@@ -1,0 +1,18 @@
+{% extends 'base.html' %}{% import '_macros.html' as m %}
+{% block title %}Search results &middot; WTP{% endblock %}
+{% block content %}
+<h1>Search results</h1>
+<p><a href="/wise_search">&larr; New search</a></p>
+{% if scan_query %}
+<details class="form-toggle"><summary>SQL query used</summary>
+<pre style="white-space: pre-wrap; font-size: 11px;">{{ scan_query }}</pre>
+</details>
+{% endif %}
+{% if ascii_list %}
+<details class="form-toggle"><summary>ASCII list ({{ numcands }})</summary>
+<pre style="white-space: pre-wrap; font-size: 11px;">{{ ascii_list }}</pre>
+</details>
+{% endif %}
+<p class="cutout-note" style="font-size:12px;color:#666;margin:.25em 0;">Cutout shown is the brightest detection of each source.</p>
+{{ m.candidate_cards(canddicts, numcands, user) }}
+{% endblock %}

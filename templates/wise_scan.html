@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}WTP scanning{% endblock %}
+{% block content %}
+<h1>WISE Transient Pipeline</h1>
+<h2>Choose a scan</h2>
+<div class="menu">
+  <a href="/wise_hostless">Hostless</a>
+  <a href="/wise_hosted">Hosted</a>
+  <a href="/wise_clu">Nearby galaxies (CLU)</a>
+  <a href="/wise_nuclear">IR nuclear flares</a>
+  <a href="/wise_lmc">LMC</a>
+  <a href="/wise_smc">SMC</a>
+  <a href="/wise_m31">M31</a>
+  <a href="/wise_yso">Young-star outbursts</a>
+  <a href="/wise_search">Search database</a>
+</div>
+<h2>PRIME (NIR bulge)</h2>
+<div class="menu">
+  <a href="/prime/scan/nightly">Nightly transients (L0+L1)</a>
+  <a href="/prime/source">Per-source viewer</a>
+</div>
+{% endblock %}

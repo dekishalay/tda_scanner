@@ -1,0 +1,22 @@
+{# prime_source_viewer #}{% extends 'base.html' %}{% import '_macros.html' as m %}
+{% block title %}PRIME source lookup{% endblock %}
+{% block content %}
+<h1>PRIME per-source viewer</h1>
+<p><a href="/">&larr; Home</a></p>
+<h2>By name</h2>
+<form class="params" action="/prime/source_search" method="post">
+  {{ m.field('Source name', 'sourcename', defpardict.sourcename) }}
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ m.csrf() }}
+  <button class="btn" type="submit">View</button>
+</form>
+<h2>By coordinates</h2>
+<form class="params" action="/prime/source_search" method="post">
+  {{ m.field('RA (deg)', 'rasearch', defpardict.rasearch) }}
+  {{ m.field('Dec (deg)', 'decsearch', defpardict.decsearch) }}
+  {{ m.field('Radius (&Prime;)', 'cmradius', defpardict.cmradius) }}
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ m.csrf() }}
+  <button class="btn" type="submit">View</button>
+</form>
+{% endblock %}

@@ -1,0 +1,52 @@
+{
+  "band": "H",
+  "tier": "98",
+  "layer0": {
+    "age_scope_days": 30.0,
+    "age_low": 0.0
+  },
+  "layer1": {
+    "scorr_peak": {
+      "dir": "min",
+      "lo": 7.090135288238526
+    },
+    "psf_chi2": {
+      "dir": "max",
+      "hi": 271.2302429199156
+    },
+    "fwhm": {
+      "dir": "both",
+      "lo": 1.6955241085740032,
+      "hi": 5.252486783191424
+    },
+    "numnegpix": {
+      "dir": "max",
+      "hi": 24.399999999999977
+    },
+    "numbadweightref": {
+      "dir": "max",
+      "hi": 4.0
+    },
+    "numbadweightsci": {
+      "dir": "max",
+      "hi": 9.0
+    },
+    "neglobe_clust": {
+      "dir": "max",
+      "hi": 2.0
+    }
+  },
+  "layer1_gated": {
+    "neglobe_dist_min": 3.6,
+    "if_clust_ge": 3
+  },
+  "layer2": {
+    "guard_days": 15.0,
+    "nsig": 5.0,
+    "min_base_nights": 10,
+    "run_prior_veto_gt": 1,
+    "post_window": 30,
+    "trig_anchor": "firstdet",
+    "confirm": "z_max > nsig (days_to_sig >= 0)"
+  }
+}

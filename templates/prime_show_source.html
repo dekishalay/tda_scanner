@@ -1,0 +1,138 @@
+{# prime_source_interactive #}{% extends 'base.html' %}{% import '_macros.html' as m %}
+{% block title %}PRIME source &middot; {{ source.name if source else 'not found' }}{% endblock %}
+{% block content %}
+<h1>PRIME source</h1>
+<p><a href="/prime/source">&larr; New lookup</a></p>
+{% if notfound %}
+  <p class="count">No PRIME source found for that query.</p>
+{% else %}
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<div class="card">
+  <img src="/prime/source_cutouts/{{ source.primeid }}.png" alt="cutouts"
+       style="width:100%;height:auto;display:block;background:#0b0e14"
+       onerror="this.style.display='none'">
+  <div class="card-body">
+    <div class="card-head">
+      <span class="name">{{ source.name }}</span>
+      <span class="coords">{{ '%.6f'|format(source.ra) }} {{ '%+.6f'|format(source.dec) }}</span>
+    </div>
+    {% if coords_sex %}<div class="coords" style="color:var(--muted);font-size:13px;margin-bottom:8px">{{ coords_sex }}</div>{% endif %}
+    <div style="margin-bottom:8px">
+      {% if tom_id %}<a class="badge-tom" target="_blank" rel="noopener" href="{{ tom_web_base }}/targets/{{ tom_id }}" style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-right:5px;color:#fff;background:#166534;text-decoration:none">in TOM</a>{% endif %}
+      {% if alert_name %}<a class="badge-alert" target="_blank" rel="noopener" href="{{ moa_display_base }}{{ alert_name }}" style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-right:5px;color:#fff;background:#b45309;text-decoration:none">known (MOA)</a>{% endif %}
+    </div>
+
+    <div id="prime-lc" data-primeid="{{ source.primeid }}"
+         style="width:100%;height:640px;background:#fff;border-radius:8px"></div>
+    <p style="font-size:12px;color:var(--muted);margin:6px 0">
+      Drag to pan &middot; scroll or box-drag to zoom &middot; double-click to
+      autoscale &middot; hover for values. Default view is the flux-space peak
+      zoom; use the buttons to switch to the full range.
+      &nbsp;[<a href="/prime/source_png/{{ source.primeid }}.png" target="_blank">static PNG</a>]
+      &nbsp;[<a href="/prime/source_fp/{{ source.primeid }}.csv" download>download forced photometry CSV</a>]
+    </p>
+
+    <dl class="meta-grid">
+      <div><dt>primeid</dt><dd>{{ source.primeid }}</dd></div>
+      {% for label, value in meta %}
+      <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+      {% endfor %}
+    </dl>
+    {% if tom_lists %}
+    <div class="actions">
+      <form class="inline" action="/prime/tom_save" method="post">
+        <input type="hidden" name="sourcename" value="{{ source.name }}">
+        <input type="hidden" name="ra" value="{{ source.ra }}">
+        <input type="hidden" name="dec" value="{{ source.dec }}">
+        {{ m.csrf() }}
+        {% for key, val in tom_lists.items() %}
+        <button class="btn btn-small" type="submit" name="tomgroup" value="{{ key }}">TOM: {{ val }}</button>
+        {% endfor %}
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% if scan_query %}
+<details class="form-toggle"><summary>SQL query used (peak candidate)</summary>
+<pre style="white-space: pre-wrap; font-size: 11px;">{{ scan_query }}</pre>
+</details>
+{% endif %}
+
+<script>
+(function(){
+  var el = document.getElementById('prime-lc');
+  if(!el || !window.Plotly) return;
+  var pid = el.getAttribute('data-primeid');
+  fetch('/prime/source_data/' + pid + '.json', {headers:{'Accept':'application/json'}})
+    .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+    .then(function(d){ draw(d); })
+    .catch(function(e){ el.innerHTML =
+      '<p style="color:#b91c1c;padding:1em">Light-curve load failed: '+e+'</p>'; });
+
+  function draw(d){
+    var traces = [];
+    d.bands.forEach(function(b){
+      // mag detections (top panel, y reversed)
+      if(b.det.mjd.length) traces.push({
+        x:b.det.mjd, y:b.det.mag, error_y:{type:'data', array:b.det.magerr, visible:true},
+        mode:'markers', type:'scatter', name:b.label+' mag',
+        marker:{color:b.color, size:8, symbol:'circle'},
+        legendgroup:b.label, xaxis:'x', yaxis:'y'});
+      // mag upper limits (open down-triangles)
+      if(b.lim.mjd.length) traces.push({
+        x:b.lim.mjd, y:b.lim.mag, mode:'markers', type:'scatter',
+        name:b.label+' lim', showlegend:false, legendgroup:b.label,
+        marker:{color:b.color, size:9, symbol:'triangle-down-open'},
+        xaxis:'x', yaxis:'y'});
+      // flux, all kept epochs (bottom panel, signed)
+      if(b.flux_all.mjd.length) traces.push({
+        x:b.flux_all.mjd, y:b.flux_all.val,
+        error_y:{type:'data', array:b.flux_all.err, visible:true},
+        mode:'markers', type:'scatter', name:b.label+' flux',
+        showlegend:false, legendgroup:b.label,
+        marker:{color:b.color, size:6, symbol:'circle'},
+        xaxis:'x2', yaxis:'y2'});
+    });
+
+    var shapes = [{type:'line', xref:'paper', x0:0, x1:1, yref:'y2', y0:0, y1:0,
+                   line:{color:'#888', width:1}}];
+    if(d.peak_mjd !== null){
+      shapes.push({type:'line', xref:'x',  x0:d.peak_mjd, x1:d.peak_mjd,
+        yref:'paper', y0:0.55, y1:1.0, line:{color:'green', width:1, dash:'dot'}});
+      shapes.push({type:'line', xref:'x2', x0:d.peak_mjd, x1:d.peak_mjd,
+        yref:'paper', y0:0.0, y1:0.45, line:{color:'green', width:1, dash:'dot'}});
+    }
+
+    var haveZoom = (d.zoom_lo !== null && d.zoom_hi !== null);
+    var layout = {
+      margin:{l:60, r:20, t:30, b:45},
+      showlegend:true, legend:{orientation:'h', x:0, y:1.08},
+      dragmode:'pan', hovermode:'closest', shapes:shapes,
+      title:{text:'PRIME '+d.primeid+'; '+d.name, font:{size:15}},
+      xaxis:{anchor:'y', domain:[0,1], showticklabels:false},
+      xaxis2:{anchor:'y2', domain:[0,1], matches:'x', title:{text:'MJD'}},
+      yaxis:{domain:[0.55,1.0], autorange:'reversed', title:{text:'Mag'}},
+      yaxis2:{domain:[0.0,0.45], title:{text:'Flux (diff)'}},
+      updatemenus:[{type:'buttons', direction:'right', x:0, y:1.16,
+        buttons:[
+          {label:'Peak zoom', method:'relayout',
+           args:[haveZoom ? {'xaxis.range':[d.zoom_lo,d.zoom_hi],
+                             'xaxis2.range':[d.zoom_lo,d.zoom_hi]}
+                          : {'xaxis.autorange':true,'xaxis2.autorange':true}]},
+          {label:'Full range', method:'relayout',
+           args:[{'xaxis.autorange':true,'xaxis2.autorange':true,
+                  'yaxis.autorange':'reversed','yaxis2.autorange':true}]}
+        ]}]
+    };
+    if(haveZoom){ layout.xaxis.range=[d.zoom_lo,d.zoom_hi];
+                  layout.xaxis2.range=[d.zoom_lo,d.zoom_hi]; }
+
+    Plotly.newPlot(el, traces, layout,
+      {responsive:true, scrollZoom:true, displaylogo:false,
+       modeBarButtonsToRemove:['select2d','lasso2d']});
+  }
+})();
+</script>
+{% endif %}
+{% endblock %}

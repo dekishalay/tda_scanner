@@ -1,0 +1,12 @@
+# secrets -- never commit
+users.json
+
+# patch backups + python cruft
+*.bak.*
+__pycache__/
+*.pyc
+patches/
+
+# scraped alert data (regenerable; comment these out if you want them versioned)
+prime_2025.csv
+prime_2026.csv

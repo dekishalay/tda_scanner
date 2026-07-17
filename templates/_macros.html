@@ -1,0 +1,207 @@
+{# form field renderers #}
+{% macro csrf() %}{% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}{% endmacro %}
+
+{% macro field(label, name, value, suffix='') %}
+<label class="field"><span>{{ label }}</span>
+  <input type="text" name="{{ name }}" value="{{ value }}">{% if suffix %}<em>{{ suffix }}</em>{% endif %}
+</label>
+{% endmacro %}
+
+{% macro wide_field(label, name, value) %}
+<label class="field"><span>{{ label }}</span>
+  <input type="text" class="wide" name="{{ name }}" value="{{ value }}">
+</label>
+{% endmacro %}
+
+{% macro range_field(label, lo, vlo, hi, vhi, suffix='') %}
+<label class="field"><span>{{ label }}</span>
+  <input type="text" name="{{ lo }}" value="{{ vlo }}"> &ndash; <input type="text" name="{{ hi }}" value="{{ vhi }}">
+  {% if suffix %}<em>{{ suffix }}</em>{% endif %}
+</label>
+{% endmacro %}
+
+{% macro brstar(d) %}
+<label class="field"><span>Reject near bright star</span>
+  mag <input type="text" name="brmaglim" value="{{ d.brmaglim|default('7.0') }}"> within
+  <input type="text" name="brdistlim" value="{{ d.brdistlim|default('10.0') }}"> <em>&Prime;</em>
+</label>
+{% endmacro %}
+
+{% macro pair_field(label, name, value, suffix, mid, name2, value2, suffix2='') %}
+<label class="field"><span>{{ label }}</span>
+  <input type="text" name="{{ name }}" value="{{ value }}">{% if suffix %}<em>{{ suffix }}</em>{% endif %}
+  {{ mid }}
+  <input type="text" name="{{ name2 }}" value="{{ value2 }}">{% if suffix2 %}<em>{{ suffix2 }}</em>{% endif %}
+</label>
+{% endmacro %}
+
+{% macro render_fields(fields, d) %}
+{% for f in fields %}
+  {% if f.kind == 'num' %}
+    {{ field(f.label, f.name, d[f.name]|default(''), f.suffix|default('')) }}
+  {% elif f.kind == 'wide' %}
+    {{ wide_field(f.label, f.name, d[f.name]|default('')) }}
+  {% elif f.kind == 'range' %}
+    {{ range_field(f.label, f.lo, d[f.lo]|default(''), f.hi, d[f.hi]|default(''), f.suffix|default('')) }}
+  {% elif f.kind == 'pair' %}
+    {{ pair_field(f.label, f.name, d[f.name]|default(''), f.suffix|default(''), f.mid|default(''), f.name2, d[f.name2]|default(''), f.suffix2|default('')) }}
+  {% elif f.kind == 'daterange' %}
+    {{ daterange_field(f.label, f.lo, d[f.lo]|default(''), f.hi, d[f.hi]|default('')) }}
+  {% elif f.kind == 'brstar' %}
+    {{ brstar(d) }}
+  {% endif %}
+{% endfor %}
+{% endmacro %}
+
+{% macro sortlimit(user, d={}, sorts=None, limits=None) %}
+{% set sorts = sorts or [('scorr_peak','Signal-to-noise'),('rbscore','RB score'),('psf_mag','Brightness'),('firstdet','First detection')] %}
+{% set limits = limits or [200,100,500] %}
+<label class="field"><span>Sort by</span>
+  <select name="sb">{% for v,l in sorts %}<option value="{{ v }}" {{ 'selected' if d.get('sb') == v }}>{{ l }}</option>{% endfor %}</select>
+  <select name="so"><option value="desc" {{ 'selected' if d.get('so', 'desc')|lower == 'desc' }}>Desc</option><option value="asc" {{ 'selected' if d.get('so', '')|lower == 'asc' }}>Asc</option></select>
+</label>
+<label class="field"><span>Limit</span>
+  <select name="candlim">{% for n in limits %}<option {{ 'selected' if d.get('candlim')|string == n|string }}>{{ n }}</option>{% endfor %}</select>
+</label>
+<input type="hidden" name="skipnum" value="0">
+<input type="hidden" name="user" value="{{ user }}">
+{{ csrf() }}
+<button class="btn" type="submit">Scan</button>
+{% endmacro %}
+
+{% macro pagination(action, defpardict, user, label='Next page &rarr;') %}
+<form class="inline" action="{{ action }}" method="post">
+  {% for k, v in defpardict.items() if k != 'csrf_token' %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ csrf() }}
+  <button class="btn" type="submit">{{ label }}</button>
+</form>
+{% endmacro %}
+
+{% macro candidate_cards(canddicts, numcands, user) %}
+<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}</p>
+<div class="cards">
+{% for i in range(0, numcands) %}
+  <article class="card">
+    <img class="cutout" src="{{ canddicts.cutouts[i] }}" alt="Candidate {{ canddicts.candids[i] }}" loading="lazy" decoding="async">
+    <div class="card-body">
+      <div class="card-head">
+        <span class="name">{{ canddicts.names[i] }}</span>
+        <span class="coords">{{ '%.5f'|format(canddicts.ras[i]) }}, {{ '%.5f'|format(canddicts.decs[i]) }}</span>
+      </div>
+      <dl class="meta-grid">
+        <div><dt>psf_mag</dt><dd>{{ '%.2f'|format(canddicts.psf_mags[i]) }}</dd></div>
+        <div><dt>band</dt><dd>{{ canddicts.bandids[i] }}</dd></div>
+        <div><dt>mjd</dt><dd>{{ '%.2f'|format(canddicts.mjds[i]) }}</dd></div>
+        <div><dt>rb</dt><dd>{{ '%.2f'|format(canddicts.rbscores[i]) }}</dd></div>
+        <div><dt>nmatches</dt><dd>{{ canddicts.nmatches[i] }}</dd></div>
+        <div><dt>firstdet</dt><dd>{{ '%.1f'|format(canddicts.firstdets[i]) }}</dd></div>
+        <div><dt>scorr</dt><dd>{{ '%.1f'|format(canddicts.scorrpeaks[i]) }}</dd></div>
+        <div><dt>br&#9733; d/m</dt><dd>{{ '%.1f'|format(canddicts.distnearbrstars[i]|default(-99, true)) }} / {{ '%.1f'|format(canddicts.magnearbrstars[i]|default(-99, true)) }}</dd></div>
+	{% if canddicts.cludists is defined and canddicts.cludists|length > 0 %}
+        <div><dt>NED</dt><dd>{{ canddicts.ned_objnames[i] }} ({{ '%.1f'|format(canddicts.cludists[i]) }}&Prime;{% if canddicts.proj_sep_kpcs is defined and canddicts.proj_sep_kpcs[i] is not none %} = {{ '%.1f'|format(canddicts.proj_sep_kpcs[i]) }} kpc{% endif %}{% if canddicts.ned_zs is defined and canddicts.ned_zs[i] is not none %}; z={{ '%.4f'|format(canddicts.ned_zs[i]) }}{% endif %}{% if canddicts.ned_distmpcs is defined and canddicts.ned_distmpcs[i] is not none %}; {{ '%.1f'|format(canddicts.ned_distmpcs[i]) }} Mpc{% endif %})</dd></div>
+        {% endif %}
+      </dl>
+      <details class="neighbors"><summary>WISE neighbours</summary>
+        <dl class="meta-grid">
+          {% for n in [1,2,3] %}
+          <div><dt>wdist{{ n }}</dt><dd>{{ '%.1f'|format(canddicts['wdist' ~ n][i]|default(-99, true)) }}</dd></div>
+          <div><dt>W1/W2 {{ n }}</dt><dd>{{ '%.1f'|format(canddicts['w1mag' ~ n][i]|default(-99, true)) }}/{{ '%.1f'|format(canddicts['w2mag' ~ n][i]|default(-99, true)) }}</dd></div>
+          {% endfor %}
+        </dl>
+      </details>
+      <div class="actions">
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://www.legacysurvey.org/viewer?ra={{ canddicts.ras[i] }}&dec={{ canddicts.decs[i] }}&zoom=14&mark={{ canddicts.ras[i] }},{{ canddicts.decs[i] }}">LS</a>
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://simbad.cds.unistra.fr/simbad/sim-coo?Coord={{ canddicts.ras[i] }}%20{{ canddicts.decs[i] }}&Radius=10&Radius.unit=arcsec">SIMBAD</a>
+        <form class="inline {{ 'on-fritz' if (canddicts.fr_ex is defined and canddicts.fr_ex[i]) }}" action="/wise_fritz" method="post" target="_blank">
+          <input type="hidden" name="candid" value="{{ canddicts.candids[i] }}">
+          <input type="hidden" name="sourcename" value="{{ canddicts.names[i] }}">
+          <input type="hidden" name="ra" value="{{ canddicts.ras[i] }}">
+          <input type="hidden" name="dec" value="{{ canddicts.decs[i] }}">
+          <input type="hidden" name="user" value="{{ user }}">
+          {{ csrf() }}
+          <button class="btn btn-small" type="submit">{{ 'On Fritz \u2713' if (canddicts.fr_ex is defined and canddicts.fr_ex[i]) else 'Fritz' }}</button>
+        </form>
+      </div>
+    </div>
+  </article>
+{% endfor %}
+</div>
+{% endmacro %}
+
+{# PRIME additions #}
+{% macro daterange_field(label, lo, vlo, hi, vhi) %}
+<label class="field"><span>{{ label }}</span>
+  <input type="date" name="{{ lo }}" value="{{ vlo }}"> &ndash; <input type="date" name="{{ hi }}" value="{{ vhi }}">
+</label>
+{% endmacro %}
+
+{% macro prime_candidate_cards(canddicts, numcands, user) %}
+<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}</p>
+<div class="cards">
+{% for i in range(0, numcands) %}
+  <article class="card">
+    <img class="cutout" src="{{ canddicts.cutouts[i] }}" alt="Candidate {{ canddicts.candids[i] }}" loading="lazy" decoding="async">
+    <div class="card-body">
+      <div class="card-head">
+        <span class="name">{{ canddicts.names[i] }}</span>
+        <span class="coords">{{ '%.5f'|format(canddicts.ras[i]) }}, {{ '%.5f'|format(canddicts.decs[i]) }}</span>
+        {% if canddicts.tom_ids is defined and canddicts.tom_ids[i] %}<a class="badge-tom" target="_blank" rel="noopener" href="{{ tom_web_base }}/targets/{{ canddicts.tom_ids[i] }}" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600;margin-left:6px;color:#fff;background:#166534;text-decoration:none">in TOM</a>{% endif %}
+        {% if canddicts.alert_names is defined and canddicts.alert_names[i] %}<a class="badge-alert" target="_blank" rel="noopener" href="{{ moa_display_base }}{{ canddicts.alert_names[i] }}" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600;margin-left:6px;color:#fff;background:#b45309;text-decoration:none">known (MOA)</a>{% endif %}
+      </div>
+      <dl class="meta-grid">
+        <div><dt>psf_mag</dt><dd>{{ '%.2f'|format(canddicts.psf_mags[i]) }}</dd></div>
+        {% if canddicts.coords_sex is defined %}<div><dt>sex</dt><dd style="font-size:11px;">{{ canddicts.coords_sex[i] }}</dd></div>{% endif %}
+        <div><dt>band</dt><dd>{{ canddicts.filters[i] }}</dd></div>
+        <div><dt>field/chip</dt><dd>{{ canddicts.fields[i] }} / C{{ canddicts.fpaposs[i] }}</dd></div>
+        <div><dt>mjd</dt><dd>{{ '%.2f'|format(canddicts.mjds[i]) }}</dd></div>
+        <div><dt>rb</dt><dd>{{ '%.2f'|format(canddicts.rbscores[i]) }}</dd></div>
+        <div><dt>scorr</dt><dd>{{ '%.1f'|format(canddicts.scorrpeaks[i]) }}</dd></div>
+        <div><dt>firstdet</dt><dd>{{ '%.1f'|format(canddicts.firstdets[i]) }}</dd></div>
+        <div><dt>br&#9733; d/m</dt><dd>{{ '%.1f'|format(canddicts.distnearbrstars[i]|default(-99, true)) }} / {{ '%.1f'|format(canddicts.magnearbrstars[i]|default(-99, true)) }}</dd></div>
+      </dl>
+      <details class="neighbors"><summary>Quality metrics</summary>
+        <dl class="meta-grid">
+          <div><dt>chi2</dt><dd>{{ '%.2f'|format(canddicts.psf_chi2s[i]|default(-99, true)) }}</dd></div>
+          <div><dt>fwhm</dt><dd>{{ '%.2f'|format(canddicts.fwhms[i]|default(-99, true)) }}</dd></div>
+          <div><dt>numneg</dt><dd>{{ canddicts.numnegpixs[i] }}</dd></div>
+          <div><dt>sumrat</dt><dd>{{ '%.2f'|format(canddicts.sumrats[i]|default(-99, true)) }}</dd></div>
+          <div><dt>bw sci/ref</dt><dd>{{ canddicts.numbadweightscis[i] }} / {{ canddicts.numbadweightrefs[i] }}</dd></div>
+          <div><dt>nmatches</dt><dd>{{ canddicts.nmatches[i] }}</dd></div>
+          <div><dt>neglobe cl/d</dt><dd>{{ canddicts.neglobe_clusts[i] }} / {{ '%.1f'|format(canddicts.neglobe_dists[i]|default(-99, true)) }}</dd></div>
+        </dl>
+      </details>
+      <details class="neighbors"><summary>VVV / 2MASS host</summary>
+        <dl class="meta-grid">
+          <div><dt>VVV d/H</dt><dd>{{ '%.1f'|format(canddicts.vvvdist1[i]|default(-99, true)) }}&Prime; / {{ '%.1f'|format(canddicts.vvvmagh1[i]|default(-99, true)) }}</dd></div>
+          {% if canddicts.vvvmagh1[i] > 0 %}<div><dt>&Delta;H</dt><dd>{{ '%.2f'|format(canddicts.vvvmagh1[i] - canddicts.psf_mags[i]) }}</dd></div>{% endif %}
+          <div><dt>2MASS d/H</dt><dd>{{ '%.1f'|format(canddicts.tmdist1[i]|default(-99, true)) }}&Prime; / {{ '%.1f'|format(canddicts.tmmagh1[i]|default(-99, true)) }}</dd></div>
+        </dl>
+      </details>
+      <div class="actions">
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://www.legacysurvey.org/viewer?ra={{ canddicts.ras[i] }}&dec={{ canddicts.decs[i] }}&zoom=14&mark={{ canddicts.ras[i] }},{{ canddicts.decs[i] }}">LS</a>
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://simbad.cds.unistra.fr/simbad/sim-coo?Coord={{ canddicts.ras[i] }}%20{{ canddicts.decs[i] }}&Radius=10&Radius.unit=arcsec">SIMBAD</a>
+        {% for gk, glabel in [('ulens', '\u03bclens'), ('trans', 'trans'), ('var', 'var')] %}
+        <form class="inline" action="/prime/tom_save" method="post" target="_blank">
+          <input type="hidden" name="sourcename" value="{{ canddicts.names[i] }}">
+          <input type="hidden" name="ra" value="{{ canddicts.ras[i] }}">
+          <input type="hidden" name="dec" value="{{ canddicts.decs[i] }}">
+          <input type="hidden" name="tomgroup" value="{{ gk }}">
+          {{ csrf() }}
+          <button class="btn btn-small" type="submit">&rarr; {{ glabel }}</button>
+        </form>
+        {% endfor %}
+      </div>
+    </div>
+  </article>
+{% endfor %}
+</div>
+{% endmacro %}
+
+{# [patch] wtp-bugfix-20260717 applied #}
+
+{# [patch] wtp-gb-fields-20260717 applied #}

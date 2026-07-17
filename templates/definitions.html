@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Parameter definitions &middot; WTP{% endblock %}
+{% block content %}
+<h1>WTP scan parameter definitions</h1>
+<p><a href="/">&larr; Home</a></p>
+<dl>
+{% for term, desc in param_defs %}
+  <dt style="font-weight:bold;margin-top:1em;">{{ term }}</dt>
+  <dd style="margin:0.2em 0 0 1em;color:#333;">{{ desc }}</dd>
+{% endfor %}
+</dl>
+{% endblock %}

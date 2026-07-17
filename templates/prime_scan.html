@@ -1,0 +1,31 @@
+{% extends 'base.html' %}{% import '_macros.html' as m with context %}
+{% block title %}{{ scan_title }} &middot; PRIME{% endblock %}
+{% block content %}
+<h1>{{ scan_title }}</h1>
+<p><a href="/">&larr; Home</a></p>
+
+{% if canddicts and numcands > 0 %}
+<details class="form-toggle"><summary>Edit parameters</summary>
+{% else %}
+<details class="form-toggle" open><summary>Parameters</summary>
+{% endif %}
+  <form class="params" action="{{ scan_action }}" method="post">
+    {{ m.render_fields(scan_fields, defpardict) }}
+    {{ m.sortlimit(user, defpardict, scan_sorts|default(None), scan_limits|default(None)) }}
+  </form>
+</details>
+
+{% if scan_query %}
+<details class="form-toggle"><summary>SQL query used</summary>
+<pre style="white-space: pre-wrap; font-size: 11px;">{{ scan_query }}</pre>
+</details>
+{% endif %}
+
+{% if canddicts and numcands > 0 %}
+  {{ m.prime_candidate_cards(canddicts, numcands, user) }}
+  <p class="count">DB offset after this page: {{ defpardict.skipnum }}</p>
+  {{ m.pagination(scan_action, defpardict, user) }}
+{% elif canddicts is not none %}
+  <p class="count">No candidates matched.</p>
+{% endif %}
+{% endblock %}

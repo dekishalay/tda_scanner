@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>TOM</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body><main class="container">
+  <p>{{ 'Created new TOM target' if created else 'Target already on TOM' }}
+     &mdash; <strong>{{ sourcename }}</strong> ({{ group }}).</p>
+  <p>Photometry is uploading in the background (may take a minute for long
+     light curves).</p>
+  <p><a href="{{ tom_url }}/targets/{{ target_id }}/" target="_blank"
+        rel="noopener">Open target in TOM</a></p>
+</main></body>
+</html>

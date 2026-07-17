@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Fritz</title>
+  <meta http-equiv="refresh" content="1; url=https://fritz.science/source/{{ sourcename }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body><main class="container">
+  <p>{{ 'Already on Fritz' if savestatus else 'Saved to Fritz' }} &mdash; redirecting to {{ sourcename }}&hellip;</p>
+</main></body>
+</html>

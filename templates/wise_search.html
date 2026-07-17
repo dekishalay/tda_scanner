@@ -1,0 +1,21 @@
+{% extends 'base.html' %}{% import '_macros.html' as m %}
+{% block title %}Search &middot; WTP{% endblock %}
+{% block content %}
+<h1>Search the WTP database</h1>
+<h2>By coordinates</h2>
+<form class="params" action="/wise_search_spatial" method="post">
+  {{ m.field('RA (deg)', 'rasearch', defpardict.rasearch) }}
+  {{ m.field('Dec (deg)', 'decsearch', defpardict.decsearch) }}
+  {{ m.field('Radius (&Prime;)', 'cmradius', defpardict.cmradius) }}
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ m.csrf() }}
+  <button class="btn" type="submit">Search</button>
+</form>
+<h2>By name</h2>
+<form class="params" action="/wise_search_name" method="post">
+  {{ m.field('Name', 'wname', defpardict.wname) }}
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ m.csrf() }}
+  <button class="btn" type="submit">Search</button>
+</form>
+{% endblock %}

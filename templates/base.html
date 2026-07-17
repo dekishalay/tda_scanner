@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}WISE Transient Pipeline{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% if user is defined and user %}
+<header class="topbar">
+  <span class="brand">WISE Transient Pipeline</span>
+  <span class="meta">{{ user }} &middot; {{ server }} &middot; {{ timenow }}</span>
+  <nav>
+    <a class="btn btn-secondary" href="/">Home</a>
+    <a class="btn btn-secondary" href="/definitions">Definitions</a>
+    <a class="btn btn-secondary" href="/logout">Log out</a>
+  </nav>
+</header>
+{% endif %}
+<main class="container">
+{% block content %}{% endblock %}
+</main>
+<script>
+(function(){
+  const cards=[...document.querySelectorAll('.card')];if(!cards.length)return;
+  let i=-1;
+  addEventListener('keydown',e=>{
+    const t=e.target.tagName;
+    if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA')return;
+    if(e.key==='j')i=Math.min(i+1,cards.length-1);
+    else if(e.key==='k')i=Math.max(i-1,0);
+    else if(e.key==='f'&&i>=0){const b=cards[i].querySelector('.actions form button');if(b)b.click();return;}
+    else return;
+    e.preventDefault();
+    cards.forEach(c=>c.classList.remove('active'));
+    cards[i].classList.add('active');
+    cards[i].scrollIntoView({block:'center',behavior:'smooth'});
+  });
+})();
+</script>
+</body>
+</html>
