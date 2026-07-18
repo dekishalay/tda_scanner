@@ -418,6 +418,21 @@ import threading
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
+import psycopg2.extensions
+
+# numpy >= 2.0 changed scalar repr to 'np.float64(x)'; psycopg2 adapts
+# float subclasses via repr(), so numpy-typed query params (e.g. the
+# astropy Time().mjd bounds) rendered as literal np.float64(...) in SQL
+# -> InvalidSchemaName. Adapt every numpy scalar through its Python type.
+for _npt in (np.float16, np.float32, np.float64):
+    psycopg2.extensions.register_adapter(
+        _npt, lambda v: psycopg2.extensions.Float(float(v)))
+for _npt in (np.int8, np.int16, np.int32, np.int64,
+             np.uint8, np.uint16, np.uint32, np.uint64):
+    psycopg2.extensions.register_adapter(
+        _npt, lambda v: psycopg2.extensions.AsIs(int(v)))
+psycopg2.extensions.register_adapter(
+    np.bool_, lambda v: psycopg2.extensions.AsIs(bool(v)))
 
 _POOLS = {}
 _POOL_LOCK = threading.Lock()
@@ -2662,3 +2677,5 @@ WTP.scans['customsql_run'] = {
     'title': 'Custom SQL results', 'fields': [],
 }
 # <<< Custom SQL scan
+
+# [patch] wtp-np-adapters-20260717 applied
