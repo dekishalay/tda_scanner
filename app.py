@@ -254,6 +254,34 @@ def run_scan(survey_key, scan_name):
         server=socket.gethostname(), timenow=now_str(), **ctx)
 
 # ---------------------------------------------------------------------------
+# Custom SQL scan: user writes a SELECT, sees a candidate count, and only on
+# confirm gets the normal scan.html results page. Query execution itself
+# (read-only enforcement, wrapping, caching the resolved candids under a
+# token) lives in surveys.wtp_run_customsql -- this view is just the
+# count-then-confirm form around it. The confirm step is the existing
+# generic /wtp/scan/customsql_run route (registered in surveys.py), not
+# handled here.
+# ---------------------------------------------------------------------------
+@app.route('/wtp/customsql', methods=['GET', 'POST'])
+@login_required
+def wtp_customsql():
+    sql_text = request.form.get('sql', '')
+    error = None
+    result = None
+    if request.method == 'POST':
+        try:
+            candids, total, truncated = surveys.wtp_run_customsql(sql_text)
+        except ValueError as e:
+            error = str(e)
+        else:
+            token = surveys.customsql_store(sql_text, candids)
+            result = {'total': total, 'truncated': truncated, 'token': token}
+    return render_template('customsql.html', user=session['user'],
+        server=socket.gethostname(), timenow=now_str(),
+        sql_text=sql_text, error=error, result=result,
+        row_cap=surveys.CUSTOMSQL_ROW_CAP)
+
+# ---------------------------------------------------------------------------
 # Legacy scan POST routes (/wise_*_scan)
 # ---------------------------------------------------------------------------
 def _make_legacy_scan(name):

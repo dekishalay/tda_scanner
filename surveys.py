@@ -580,12 +580,15 @@ def _wtp_f(form, k): return float(form[k])
 def _wtp_i(form, k): return int(form[k])
 
 def _wtp_base(form):
+	# Column refs are qualified with cand. -- xmatch inner-joins source_fp_stats,
+	# which has its own columns of these same names, so unqualified refs are
+	# ambiguous there even though every other WTP tab only ever sees candidates/fields.
 	sql = ('abs(f.gallat) >= %s AND abs(f.gallat) < %s '
-		'AND epochid = %s AND rbscore >= %s AND rbscore <= %s '
-		'AND nmatches >= %s AND scorr_peak >= %s AND ispos = 1 '
-		'AND mjd - firstdet > %s AND mjd - firstdet < %s AND distnearbrstar > %s '
-		'AND (wdist1 > %s OR w1mag1 > %s) AND (wdist2 > %s OR w1mag2 > %s) '
-		'AND (wdist3 > %s OR w1mag3 > %s)')
+		'AND cand.epochid = %s AND cand.rbscore >= %s AND cand.rbscore <= %s '
+		'AND cand.nmatches >= %s AND cand.scorr_peak >= %s AND cand.ispos = 1 '
+		'AND cand.mjd - cand.firstdet > %s AND cand.mjd - cand.firstdet < %s AND cand.distnearbrstar > %s '
+		'AND (cand.wdist1 > %s OR cand.w1mag1 > %s) AND (cand.wdist2 > %s OR cand.w1mag2 > %s) '
+		'AND (cand.wdist3 > %s OR cand.w1mag3 > %s)')
 	brd, brm = _wtp_f(form, 'brdistlim'), _wtp_f(form, 'brmaglim')
 	params = [_wtp_f(form, 'gallimlow'), _wtp_f(form, 'gallimhigh'), _wtp_i(form, 'scanep'),
 		_wtp_f(form, 'rbscorelow'), _wtp_f(form, 'rbscorehigh'), _wtp_i(form, 'nmatches'),
@@ -2179,3 +2182,483 @@ def build_prime_source_context(survey, form):
 # [patch] wtp-nightly-window-20260717 applied
 
 # [patch] wtp-gb-fields-20260717 applied
+
+
+# >>> NEOWISE x ZTF/LSST crossmatch scan (SKELETON -- fill the *** markers)
+# ---------------------------------------------------------------------------
+# New scanning tab: NEOWISE transients crossmatched to ZTF and/or LSST.
+#
+# Design (mirrors the PRIME patch pattern above):
+#   1. WTPX = a pseudo-survey sharing the WTP (NEOWISE) connection + schema,
+#      registered as key 'wtpx'. Registering a separate key (rather than
+#      adding a scan to WTP) gives the scan its OWN cutout URL namespace
+#      (/wtpx/cutout/<candid>.png), which is how the renderer knows to draw
+#      the extra ZTF/LSST panel -- the cutout route only knows (survey, candid).
+#   2. One scan 'xmatch': the hostless-tab criteria (_wtp_base + hlwdist; swap
+#      in any other builder if you'd rather clone the hosted/nuclear tab),
+#      INNER JOINed to source_fp_stats directly on candid, requiring
+#      ztfname/lsstname per the form.
+#   3. A wtpx-only renderer: standard NEOWISE cutouts + LC figure, plus a
+#      second LC panel (shared MJD axis) with ZTF/LSST photometry pulled from
+#      the Babamul alert broker (TTL-cached, never fails the render).
+#
+# Routes come for free from app.py's generic /<survey_key>/scan/<scan_name>
+# route; the only app-side change needed is a menu link (see wise_scan.html).
+# ---------------------------------------------------------------------------
+import dataclasses as _dc
+
+# --- Babamul broker client --------------------------------------------------
+# Uses the babamul package (get_photometry), auth'd via BABAMUL_API_TOKEN /
+# BABAMUL_ENV per babamul.config -- no ad-hoc REST client needed. Cache:
+# (survey, name) -> (ts, lc|None), TTL'd; on any failure return the stale
+# entry or None -- a scan render must never fail because the broker is down
+# (same rule as the Fritz cache above).
+from babamul.api import get_photometry
+from babamul.lightcurves import SNR_THRESHOLD, _normalize_band
+from babamul.exceptions import BabamulError
+
+BABAMUL_TTL = float(os.environ.get('BABAMUL_TTL', '3600'))
+_BABAMUL_CACHE = {}
+_BABAMUL_LOCK = threading.Lock()
+
+def _phot_isdiffpos(p):
+    """isdiffpos, falling back to the psfFlux sign when the package leaves it
+    unset. babamul.raw_models.Photometry.from_forced_photometry (used to
+    build fp_hists rows) never sets isdiffpos -- it stays at the field
+    default None regardless of the flux sign -- while from_alert_photometry
+    (prv_candidates) does set it correctly. Without this fallback, every
+    forced-photometry detection renders as if it were positive."""
+    if p.isdiffpos is not None:
+        return p.isdiffpos
+    if p.psfFlux is not None:
+        return p.psfFlux > 0
+    return None
+
+def _babamul_flatten(prv_candidates, prv_nondetections, fp_hists):
+    """Flatten babamul Photometry records into per-point dicts, mirroring
+    babamul.lightcurves.get_prv_candidates/get_prv_nondetections/get_fp_hists
+    (same SNR_THRESHOLD detection/limit split) but keeping isdiffpos, which
+    those helpers drop -- needed to mark negative-flux ('isdiffpos=False')
+    detections with a distinct marker."""
+    rows = []
+    for p in prv_candidates + fp_hists:
+        mjd = p.jd - 2400000.5
+        band = _normalize_band(p.band)
+        if p.snr and p.snr >= SNR_THRESHOLD:
+            rows.append({'mjd': mjd, 'mag': p.magpsf, 'magerr': p.sigmapsf,
+                'band': band, 'lim': False, 'isdiffpos': _phot_isdiffpos(p)})
+        elif p.diffmaglim is not None:
+            rows.append({'mjd': mjd, 'mag': p.diffmaglim, 'magerr': None,
+                'band': band, 'lim': True, 'isdiffpos': None})
+    for p in prv_nondetections:
+        rows.append({'mjd': p.jd - 2400000.5, 'mag': p.diffmaglim,
+            'magerr': None, 'band': _normalize_band(p.band), 'lim': True,
+            'isdiffpos': None})
+    return rows
+
+def babamul_get_lightcurve(ext_survey, name):
+    """Fetch a ZTF or LSST light curve for `name` from Babamul.
+
+    ext_survey: 'ztf' | 'lsst'.  Returns a normalized dict of np arrays
+    {'mjd', 'mag', 'magerr', 'limmag', 'isdet', 'isneg', 'filt'} (filt =
+    filter-name strings, e.g. 'g','r','i' / 'u'..'y'; isneg = detection with
+    isdiffpos == False, i.e. a negative-flux/subtraction-artifact point), or
+    None when unavailable.
+    """
+    key = (ext_survey, name)
+    now = time.time()
+    with _BABAMUL_LOCK:
+        hit = _BABAMUL_CACHE.get(key)
+        if hit and now - hit[0] < BABAMUL_TTL:
+            return hit[1]
+    try:
+        phot = get_photometry(ext_survey.upper(), name)
+        rows = _babamul_flatten(phot.prv_candidates, phot.prv_nondetections,
+            phot.fp_hists)
+        if not rows:
+            lc = None
+        else:
+            isdet = np.array([not r['lim'] for r in rows], dtype=bool)
+            mag = np.array([np.nan if r['mag'] is None else r['mag']
+                for r in rows], dtype=float)
+            lc = {
+                'mjd': np.array([r['mjd'] for r in rows], dtype=float),
+                'mag': np.where(isdet, mag, np.nan),
+                'magerr': np.array([np.nan if r['magerr'] is None else r['magerr']
+                    for r in rows], dtype=float),
+                'limmag': np.where(isdet, np.nan, mag),
+                'isdet': isdet,
+                'isneg': np.array([r['isdiffpos'] is False for r in rows], dtype=bool),
+                'filt': np.array([_normalize_band(r['band']) for r in rows]),
+            }
+    except BabamulError as e:
+        logging.getLogger(__name__).warning('babamul %s/%s failed: %s',
+            ext_survey, name, e)
+        with _BABAMUL_LOCK:
+            hit = _BABAMUL_CACHE.get(key)
+        return hit[1] if hit else None              # stale beats broken
+    with _BABAMUL_LOCK:
+        _BABAMUL_CACHE[key] = (now, lc)
+    return lc
+
+# Colors per (survey, filter); marker distinguishes survey on the plot
+# (ZTF = circles, LSST = squares). *** confirm LSST filter naming from broker.
+EXT_BAND_COLORS = {
+    ('ztf', 'g'): 'green', ('ztf', 'r'): 'red', ('ztf', 'i'): 'orange',
+    ('lsst', 'u'): 'purple', ('lsst', 'g'): 'g', ('lsst', 'r'): 'r',
+    ('lsst', 'i'): 'goldenrod', ('lsst', 'z'): 'brown', ('lsst', 'y'): '0.4',
+}
+EXT_MARKERS = {'ztf': 'o', 'lsst': 's'}
+
+# --- Crossmatch join + predicate builder ------------------------------------
+# INNER JOIN source_fp_stats directly on candid -- confirmed join key. INNER
+# means candidates with no source_fp_stats row (not yet xmatched) drop out,
+# which is the point of this tab.
+WTPX_JOIN = 'INNER JOIN source_fp_stats xm ON xm.candid = cand.candid'
+
+# Surfaced onto the result cards by serialize_candidates (extra_select cols
+# are auto-attached keyed by their SQL alias). Display needs a small addition
+# to the candidate_cards macro in _macros.html, e.g. badges linking to the
+# ZTF name on Fritz / the LSST name on its broker page.
+WTPX_EXTRA = [('ztfnames', 'xm.ztfname'), ('lsstnames', 'xm.lsstname')]
+
+# Peak-to-peak / amplitude-from-nondetection measurements in source_fp_stats,
+# split into diff- and stack-image groups for the 'Min. diff mag' / 'Min.
+# stack mag' filters -- each group true if ANY of its 4 columns exceeds its
+# own form threshold, and the two groups are AND'd together. NaN is a real
+# stored float value in this table (not SQL NULL), so it must be excluded
+# explicitly: Postgres treats NaN as greater than every other float, so an
+# unguarded '> %s' would let NaN rows leak in.
+WTPX_DIFF_AMP_COLS = [
+    'diff_w1_psfmag_ptp', 'diff_w2_psfmag_ptp',
+    'diff_w1_amplitude_from_nondet', 'diff_w2_amplitude_from_nondet',
+]
+WTPX_STACK_AMP_COLS = [
+    'stack_w1_psfmag_ptp', 'stack_w2_psfmag_ptp',
+    'stack_w1_amplitude_from_nondet', 'stack_w2_amplitude_from_nondet',
+]
+
+def wtp_xmatch(form):
+    # Standalone builder (like wtp_yso) rather than _wtp_base -- this tab has
+    # no Age field, so the hostless-tab criteria are inlined here minus the
+    # mjd-firstdet age window. Column refs are qualified with cand. because
+    # this tab inner-joins source_fp_stats, which has columns of the same
+    # names (unqualified refs are ambiguous there).
+    brd, brm = _wtp_f(form, 'brdistlim'), _wtp_f(form, 'brmaglim')
+    sql = ['abs(f.gallat) >= %s AND abs(f.gallat) < %s '
+        'AND cand.epochid = %s AND cand.rbscore >= %s AND cand.rbscore <= %s '
+        'AND cand.nmatches >= %s AND cand.scorr_peak >= %s AND cand.ispos = 1 '
+        'AND cand.distnearbrstar > %s '
+        'AND (cand.wdist1 > %s OR cand.w1mag1 > %s) AND (cand.wdist2 > %s OR cand.w1mag2 > %s) '
+        'AND (cand.wdist3 > %s OR cand.w1mag3 > %s)']
+    p = [_wtp_f(form, 'gallimlow'), _wtp_f(form, 'gallimhigh'), _wtp_i(form, 'scanep'),
+        _wtp_f(form, 'rbscorelow'), _wtp_f(form, 'rbscorehigh'), _wtp_i(form, 'nmatches'),
+        _wtp_f(form, 'scorrpeak'), brd,
+        brd, brm, brd, brm, brd, brm]
+    # Crossmatch requirement from the form: either | ztf | lsst | both.
+    req = str(form.get('xmreq', 'either')).strip().lower()
+    sql.append({
+        'ztf': 'xm.ztfname IS NOT NULL',
+        'lsst': 'xm.lsstname IS NOT NULL',
+        'both': 'xm.ztfname IS NOT NULL AND xm.lsstname IS NOT NULL',
+    }.get(req, '(xm.ztfname IS NOT NULL OR xm.lsstname IS NOT NULL)'))
+    # Min. diff mag / Min. stack mag: true if any of the diff group's 4
+    # ptp-or-amplitude measures exceeds mindiffmag (and isn't NaN), AND
+    # likewise for the stack group against minstackmag.
+    mindiff = _wtp_f(form, 'mindiffmag')
+    minstack = _wtp_f(form, 'minstackmag')
+    for cols, thresh in ((WTPX_DIFF_AMP_COLS, mindiff), (WTPX_STACK_AMP_COLS, minstack)):
+        sql.append('(%s)' % ' OR '.join(
+            "(xm.%s > %%s AND xm.%s != 'NaN')" % (c, c) for c in cols))
+        p += [thresh] * len(cols)
+    return ' AND '.join(sql), p
+
+WTPX_DEFAULTS = {
+    # hostless-tab defaults (values mirror app.py's defhostless) + xmreq
+    'rbscorelow': 0.1, 'rbscorehigh': 1.0, 'nmatches': 2,
+    'gallimlow': 0.0, 'gallimhigh': 10.0,
+    'brdistlim': 10.0, 'brmaglim': 7.0,
+    'scorrpeak': 10.0, 'scanep': 10,
+    'skipnum': 0, 'xmreq': 'either', 'mindiffmag': 3.0, 'minstackmag': 1.0,
+}
+
+_F_XMATCH = [f for f in _F_BASE if f.get('lo') != 'agelowlim'] + [
+    {'kind': 'num', 'label': 'Min. diff mag', 'name': 'mindiffmag', 'suffix': 'mag'},
+    {'kind': 'num', 'label': 'Min. stack mag', 'name': 'minstackmag', 'suffix': 'mag'},
+    _F_BR,
+    {'kind': 'wide', 'label': 'Require xmatch (either/ztf/lsst/both)', 'name': 'xmreq'},
+]
+
+# --- Pseudo-survey registration ---------------------------------------------
+WTPX = _dc.replace(WTP, key='wtpx', label='NEOWISE x ZTF/LSST',
+    scans={
+        'xmatch': {'template': 'scan.html', 'builder': wtp_xmatch,
+            'join': lambda f: (WTPX_JOIN, []), 'extra': WTPX_EXTRA,
+            'defaults': WTPX_DEFAULTS,
+            'title': 'NEOWISE transients crossmatched to ZTF / LSST',
+            'fields': _F_XMATCH},
+    })
+SURVEYS[WTPX.key] = WTPX
+
+# --- Renderer: NEOWISE figure + ZTF/LSST panel ------------------------------
+def _wtpx_ext_names(cur, cand):
+    """{'ztfname':..., 'lsstname':...} for this candidate, or None. Keyed
+    directly by candid, same join key as WTPX_JOIN."""
+    cur.execute('SELECT ztfname, lsstname FROM source_fp_stats '
+        'WHERE candid = %s LIMIT 1;', (cand['candid'],))
+    return cur.fetchone()
+
+def _wtpx_render_png(survey, candid):
+    """Standard WTP figure (cutouts + NEOWISE LC via _build_figure) with an
+    extra ZTF/LSST panel appended below, sharing the MJD axis range."""
+    conn, cur = survey.open_cursor()
+    try:
+        cur.execute('SELECT %s.* FROM %s WHERE %s.%s = %%s LIMIT 1'
+            % (survey.alias, survey.base_from, survey.alias, survey.id_col),
+            (candid,))
+        cand = cur.fetchone()
+        if cand is None:
+            raise KeyError(candid)
+        lc = wtp_fetch_lightcurve(cur, cand)
+        lims = wtp_fetch_limits(cur, cand)
+        name = wtp_fetch_name(cur, cand)
+        cut = wtp_fetch_cutouts(cur, cand)
+        fp = wtp_fetch_forced(cur, cand)
+        xm = _wtpx_ext_names(cur, cand)
+    finally:
+        survey.close_cursor(conn, cur)
+
+    # Broker calls AFTER the cursor is returned to the pool (they can be slow).
+    ext = []                                    # [(survey, name, lc), ...]
+    if xm:
+        for s, k in (('ztf', 'ztfname'), ('lsst', 'lsstname')):
+            if xm.get(k):
+                elc = babamul_get_lightcurve(s, xm[k])
+                if elc is not None and len(elc['mjd']):
+                    ext.append((s, xm[k], elc))
+
+    from matplotlib.gridspec import GridSpec
+    fig = Figure(figsize=(10, 13 if cut is not None else 8))
+    if cut is not None:
+        gs = GridSpec(3, 3, figure=fig, height_ratios=[1.0, 1.1, 1.1])
+        for i, (img, ttl) in enumerate(zip(
+                (cut['sci'], cut['ref'], cut['diff']),
+                ('Science', 'Reference', 'Difference'))):
+            a = fig.add_subplot(gs[0, i])
+            _, med, std = sigma_clipped_stats(img)
+            a.imshow(img, cmap='gray', vmin=med - std, vmax=med + 5 * std)
+            a.set_title(ttl, fontsize=16)
+            a.set_xticks([]); a.set_yticks([])
+        ax_ir = fig.add_subplot(gs[1, :])
+        ax_opt = fig.add_subplot(gs[2, :], sharex=ax_ir)
+    else:
+        gs = GridSpec(2, 1, figure=fig)
+        ax_ir = fig.add_subplot(gs[0])
+        ax_opt = fig.add_subplot(gs[1], sharex=ax_ir)
+
+    # -- NEOWISE panel: same conventions as _build_figure (forced solid,
+    # candidate-based faded, limits as arrows, stack forced as open diamonds).
+    has_fp = bool(fp and len(fp['mjd']))
+    cand_alpha = 0.3 if has_fp else 1.0
+    fsmag = np.asarray(fp.get('smag', [])) if has_fp else np.array([])
+    fsmagerr = np.asarray(fp.get('smagerr', [])) if has_fp else np.array([])
+    fsdet = np.asarray(fp.get('sisdet', []), dtype=bool) if has_fp else np.array([], dtype=bool)
+    for b in survey.bands:
+        d = (lc['bandid'] == b.id)
+        if np.any(d):
+            ax_ir.errorbar(lc['mjd'][d], lc['mag'][d],
+                yerr=np.abs(lc['magerr'][d]), ls='none', marker='s',
+                color=b.color, ms=9, alpha=cand_alpha,
+                label=(None if has_fp else b.label))
+        if has_fp:
+            fb = (np.asarray(fp['bandid']) == b.id)
+            det = fb & np.asarray(fp['isdet'], dtype=bool)
+            lim = fb & ~np.asarray(fp['isdet'], dtype=bool)
+            if np.any(det):
+                ax_ir.errorbar(fp['mjd'][det], fp['mag'][det],
+                    yerr=np.abs(fp['magerr'][det]), ls='none', marker='o',
+                    color=b.color, ms=10, label=b.label)
+            if np.any(lim):
+                ax_ir.errorbar(fp['mjd'][lim], fp['limmag'][lim], yerr=0.2,
+                    uplims=True, ls='none', marker='v', color=b.color,
+                    markerfacecolor='none', ms=8)
+            # forced STACK photometry -- open diamonds + thin line, no limits
+            # (same convention as _build_figure).
+            if len(fsmag):
+                sb = fb & fsdet & np.isfinite(fsmag)
+                if np.any(sb):
+                    ax_ir.errorbar(fp['mjd'][sb], fsmag[sb], yerr=np.abs(fsmagerr[sb]),
+                        ls='-', lw=0.8, marker='D', mfc='none', color=b.color, ms=8)
+    ax_ir.set_ylabel('NEOWISE mag', fontsize=16)
+    ax_ir.set_title('Candidate %d; %s' % (candid, name), fontsize=16)
+    ax_ir.invert_yaxis()
+    handles, labels = ax_ir.get_legend_handles_labels()
+    if handles:
+        if has_fp and len(fsmag) and fsdet.any():
+            from matplotlib.lines import Line2D
+            handles = handles + [
+                Line2D([], [], color='0.3', marker='o', ls='none', ms=9),
+                Line2D([], [], color='0.3', marker='D', mfc='none', ls='none', ms=8)]
+            labels = labels + ['diff forced', 'stack forced']
+        ax_ir.legend(handles, labels, fontsize=10)
+
+    # -- ZTF/LSST panel from Babamul --
+    for s, nm, elc in ext:
+        mk = EXT_MARKERS[s]
+        isneg = elc.get('isneg', np.zeros(len(elc['mjd']), dtype=bool))
+        for f in np.unique(elc['filt']):
+            sel = (elc['filt'] == f)
+            col = EXT_BAND_COLORS.get((s, str(f)), 'k')
+            det = sel & elc['isdet']
+            lim = sel & ~elc['isdet'] & np.isfinite(elc['limmag'])
+            det_pos = det & ~isneg
+            det_neg = det & isneg
+            if np.any(det_pos):
+                ax_opt.errorbar(elc['mjd'][det_pos], elc['mag'][det_pos],
+                    yerr=np.abs(elc['magerr'][det_pos]), ls='none', marker=mk,
+                    color=col, ms=7, label='%s %s' % (s.upper(), f))
+            if np.any(det_neg):
+                # isdiffpos == False -- negative-flux ('negative') detection,
+                # marked with a cross instead of the normal survey marker.
+                ax_opt.errorbar(elc['mjd'][det_neg], elc['mag'][det_neg],
+                    yerr=np.abs(elc['magerr'][det_neg]), ls='none', marker='x',
+                    color=col, ms=7,
+                    label=(None if np.any(det_pos) else '%s %s (neg)' % (s.upper(), f)))
+            if np.any(lim):
+                ax_opt.errorbar(elc['mjd'][lim], elc['limmag'][lim], yerr=0.2,
+                    uplims=True, ls='none', marker='v', color=col,
+                    markerfacecolor='none', ms=6, alpha=0.5)
+    ax_opt.set_ylabel('ZTF / LSST mag', fontsize=16)
+    ax_opt.set_xlabel('MJD', fontsize=16)
+    ax_opt.invert_yaxis()
+    if ext:
+        ax_opt.legend(fontsize=9, ncol=3)
+        ax_opt.set_title(' / '.join('%s' % nm for _, nm, _e in ext), fontsize=11)
+    else:
+        ax_opt.text(0.5, 0.5, 'no broker photometry available',
+            transform=ax_opt.transAxes, ha='center', color='0.5')
+
+    # Candidate-epoch marker on both panels (blue dashed, as elsewhere).
+    _cmjd = cand.get('mjd')
+    if _cmjd is not None and np.isfinite(float(_cmjd)):
+        for axx in (ax_ir, ax_opt):
+            axx.axvline(float(_cmjd), color='b', ls='--', lw=1.0, alpha=0.7)
+    if len(lc['mjd']) or (ext and len(ext[0][2]['mjd'])):
+        ax2 = ax_ir.twiny()
+        ax2.set_xlim(Time(ax_ir.get_xlim(), format='mjd').decimalyear)
+        ax2.set_xlabel('Year', fontsize=14)
+
+    fig.tight_layout()
+    FigureCanvasAgg(fig)
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=80)
+    return buf.getvalue()
+
+# Dispatch: wtpx goes through the crossmatch renderer; everything else keeps
+# its existing path (chains behind the PRIME wrapper above).
+_png_pre_wtpx = candidate_png_by_id
+def candidate_png_by_id(survey, candid):
+    if getattr(survey, 'key', None) == 'wtpx':
+        return _wtpx_render_png(survey, candid)
+    return _png_pre_wtpx(survey, candid)
+# <<< NEOWISE x ZTF/LSST crossmatch scan
+
+
+# >>> Custom SQL scan -----------------------------------------------------
+# ---------------------------------------------------------------------------
+# A tab where the user writes an arbitrary SELECT statement, sees how many
+# candidates it resolves to, and -- only if they confirm -- gets the normal
+# scan.html results page (cards, cutouts, pagination) for those candidates.
+#
+# Two-step flow:
+#   1. wtp_run_customsql(sql_text) executes the user's SELECT in a Postgres
+#      READ ONLY transaction with a statement timeout, wrapped so only a
+#      `candid` output column is ever pulled out. The READ ONLY transaction
+#      is a real DB-level guarantee (verified: Postgres raises
+#      ReadOnlySqlTransaction on INSERT/UPDATE/DELETE/DDL regardless of
+#      wording) -- it is the actual security boundary here, not the
+#      single-statement check below, which is just a usability guard.
+#      The resolved candid list is cached server-side under a random token
+#      (app.py never re-executes the user's SQL on confirm).
+#   2. The 'customsql_run' WTP scan's builder looks up that token and
+#      returns 'cand.candid = ANY(%s)' -- from there it's just another scan,
+#      reusing run_candidate_query/serialize_candidates/scan.html exactly as
+#      every other tab does (dedup by name, sort, candlim/skipnum paging,
+#      on-demand cutout PNGs via the existing /wtp/cutout/<candid>.png route).
+# ---------------------------------------------------------------------------
+import secrets as _secrets
+
+CUSTOMSQL_TTL = float(os.environ.get('CUSTOMSQL_TTL', '600'))          # 10 min
+CUSTOMSQL_ROW_CAP = int(os.environ.get('CUSTOMSQL_ROW_CAP', '5000'))
+CUSTOMSQL_TIMEOUT_MS = int(os.environ.get('CUSTOMSQL_TIMEOUT_MS', '30000'))
+_CUSTOMSQL_CACHE = {}
+_CUSTOMSQL_LOCK = threading.Lock()
+
+def _customsql_gc():
+    now = time.time()
+    with _CUSTOMSQL_LOCK:
+        for k in [k for k, v in _CUSTOMSQL_CACHE.items()
+                if now - v['ts'] > CUSTOMSQL_TTL]:
+            del _CUSTOMSQL_CACHE[k]
+
+def customsql_store(sql_text, candids):
+    _customsql_gc()
+    token = _secrets.token_urlsafe(16)
+    with _CUSTOMSQL_LOCK:
+        _CUSTOMSQL_CACHE[token] = {'ts': time.time(), 'sql': sql_text,
+            'candids': candids}
+    return token
+
+def customsql_lookup(token):
+    with _CUSTOMSQL_LOCK:
+        return _CUSTOMSQL_CACHE.get(token)
+
+def wtp_run_customsql(sql_text):
+    """Execute a user-supplied read-only SQL query and resolve it to a list
+    of candids. Returns (candids, total, truncated).
+
+    Raises ValueError (safe to show to the user -- they wrote the query) on
+    an empty/multi-statement query, a bad column name, a rejected mutation,
+    a timeout, or any other Postgres error.
+    """
+    text = sql_text.strip()
+    if not text:
+        raise ValueError('Query is empty.')
+    if text.endswith(';'):
+        text = text[:-1].rstrip()
+    if ';' in text:
+        raise ValueError("Only a single SQL statement is allowed "
+            "(remove the extra ';').")
+    wrapped = ('SELECT DISTINCT candid FROM (%s) AS _customsql_user_query '
+        'LIMIT %%s' % text)
+    conn, cur = _wtp_open()
+    try:
+        conn.set_session(readonly=True)
+        cur.execute('SET statement_timeout = %s', (CUSTOMSQL_TIMEOUT_MS,))
+        cur.execute(wrapped, (CUSTOMSQL_ROW_CAP + 1,))
+        rows = cur.fetchall()
+    except psycopg2.Error as e:
+        raise ValueError(str(e).strip())
+    finally:
+        try:
+            conn.set_session(readonly=False)
+        except Exception:
+            pass
+        _wtp_close(conn, cur)
+    truncated = len(rows) > CUSTOMSQL_ROW_CAP
+    candids = [r['candid'] for r in rows[:CUSTOMSQL_ROW_CAP]]
+    return candids, len(candids), truncated
+
+def wtp_customsql_where(form):
+    token = form.get('customsql_token', '')
+    entry = customsql_lookup(token)
+    if entry is None:
+        raise KeyError('Custom-SQL result expired or not found; '
+            'go back and resubmit the query.')
+    return 'cand.candid = ANY(%s)', [entry['candids']]
+
+WTP.scans['customsql_run'] = {
+    'template': 'scan.html', 'builder': wtp_customsql_where,
+    'title': 'Custom SQL results', 'fields': [],
+}
+# <<< Custom SQL scan

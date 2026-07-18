@@ -1,0 +1,47 @@
+{% extends 'base.html' %}{% import '_macros.html' as m %}
+{% block title %}Custom SQL &middot; WTP{% endblock %}
+{% block content %}
+<h1>Custom SQL scan</h1>
+<p><a href="/">&larr; Home</a></p>
+<p style="color:var(--muted);font-size:14px;max-width:700px;">
+  Write a SELECT statement against the WTP database. It must return a
+  <code>candid</code> column (join/aggregate however you like otherwise) --
+  those candidates get resolved and shown below for confirmation before any
+  scan results are generated. Runs read-only: any INSERT/UPDATE/DELETE/DDL
+  is rejected by Postgres itself, regardless of wording.
+</p>
+
+<form class="params" action="/wtp/customsql" method="post">
+  <textarea name="sql" rows="8" spellcheck="false"
+    style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;
+      font-size:13px;padding:10px;border:1px solid var(--line);border-radius:6px;
+      background:var(--bg);color:inherit;"
+    placeholder="SELECT candid FROM candidates WHERE rbscore > 0.9 AND ispos = 1">{{ sql_text }}</textarea>
+  <input type="hidden" name="user" value="{{ user }}">
+  {{ m.csrf() }}
+  <div style="margin-top:10px;"><button class="btn" type="submit">Run query</button></div>
+</form>
+
+{% if error %}
+<p class="flash" style="text-align:left;">{{ error }}</p>
+{% endif %}
+
+{% if result %}
+<details class="form-toggle" open><summary>Result</summary>
+  {% if result.total == 0 %}
+  <p class="count">No candidates matched.</p>
+  {% else %}
+  <p class="count">
+    {% if result.truncated %}At least {{ row_cap }} (truncated){% else %}{{ result.total }}{% endif %}
+    candidate{{ '' if result.total == 1 else 's' }} matched.
+  </p>
+  <form class="inline" action="/wtp/scan/customsql_run" method="post">
+    <input type="hidden" name="customsql_token" value="{{ result.token }}">
+    <input type="hidden" name="user" value="{{ user }}">
+    {{ m.csrf() }}
+    <button class="btn" type="submit">Continue &rarr; generate scan results</button>
+  </form>
+  {% endif %}
+</details>
+{% endif %}
+{% endblock %}
