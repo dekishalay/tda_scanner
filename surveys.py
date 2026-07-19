@@ -2679,3 +2679,94 @@ WTP.scans['customsql_run'] = {
 # <<< Custom SQL scan
 
 # [patch] wtp-np-adapters-20260717 applied
+
+
+# >>> PRIME Slack alert button  (patch prime-slack-alert-20260719) -----------------------------------
+# "Post to Slack" on PRIME scan cards -> /prime/slack_alert (app.py). Renders
+# the SAME figure as the scan card (candidate_png_by_id -> _prime_render_png)
+# and uploads it with a caption. Env: SLACK_ALERT_TOKEN (else SLACK_BOT_TOKEN),
+# SLACK_ALERT_CHANNEL (else SLACK_CHANNEL). Synchronous (one upload) so the
+# click gets real success/failure feedback.
+try:
+    from slack_sdk import WebClient as _SlackWebClient
+except Exception:
+    _SlackWebClient = None
+
+SLACK_ALERT_TOKEN = (os.environ.get('SLACK_ALERT_TOKEN')
+                     or os.environ.get('SLACK_BOT_TOKEN', ''))
+SLACK_ALERT_CHANNEL = (os.environ.get('SLACK_ALERT_CHANNEL')
+                       or os.environ.get('SLACK_CHANNEL', ''))
+if not (SLACK_ALERT_TOKEN and SLACK_ALERT_CHANNEL):
+    logging.getLogger(__name__).warning(
+        'Slack alerts not configured (SLACK_ALERT_TOKEN/SLACK_ALERT_CHANNEL); '
+        'the alert button will 502')
+
+
+def _prime_alert_caption(cand, name, alerter):
+    def g(k, fmt='%s'):
+        v = cand.get(k)
+        if v is None:
+            return '\u2014'
+        try:
+            return fmt % v
+        except Exception:
+            return str(v)
+    try:
+        sex = SkyCoord(ra=float(cand['ra']), dec=float(cand['dec']),
+                       unit='degree', frame='icrs').to_string('hmsdms', precision=2)
+    except Exception:
+        sex = ''
+    age = '\u2014'
+    if cand.get('mjd') is not None and cand.get('firstdet') is not None:
+        age = '%.1f' % (cand['mjd'] - cand['firstdet'])
+    return '\n'.join([
+        ':rotating_light: *PRIME alert: %s*  _(by %s)_' % (name, alerter),
+        'mag *%s* %s   |   scorr_peak %s   |   age %s d'
+        % (g('psf_mag', '%.2f'), g('filter2'), g('scorr_peak', '%.1f'), age),
+        'RA/Dec  `%.6f  %+.6f`  (%s)'
+        % (float(cand['ra']), float(cand['dec']), sex),
+        'field *%s*   fpapos *%s*   candid `%s`'
+        % (g('field'), g('fpapos'), g('candid')),
+    ])
+
+
+def prime_post_slack_alert(survey, candid, alerter):
+    """Render the scan-card figure for `candid` and post it to Slack with a
+    caption. Returns (source_name, permalink|None). Raises on failure."""
+    if _SlackWebClient is None:
+        raise RuntimeError('slack_sdk not installed on the server')
+    if not (SLACK_ALERT_TOKEN and SLACK_ALERT_CHANNEL):
+        raise RuntimeError('SLACK_ALERT_TOKEN / SLACK_ALERT_CHANNEL not set')
+
+    conn, cur = survey.open_cursor()
+    try:
+        cur.execute('SELECT %s.* FROM %s WHERE %s.%s = %%s LIMIT 1'
+            % (survey.alias, survey.base_from, survey.alias, survey.id_col),
+            (candid,))
+        cand = cur.fetchone()
+        if cand is None:
+            raise KeyError(candid)
+        name = (survey.fetch_name(cur, cand) if survey.fetch_name
+                else 'PRIME%d' % candid)
+    finally:
+        survey.close_cursor(conn, cur)
+
+    png = candidate_png_by_id(survey, candid)     # -> _prime_render_png
+    caption = _prime_alert_caption(cand, name, alerter)
+
+    client = _SlackWebClient(token=SLACK_ALERT_TOKEN)
+    resp = client.files_upload_v2(
+        channel=SLACK_ALERT_CHANNEL, file=png,
+        filename='prime_%s_%d.png' % (name, candid),
+        title='PRIME %s (candid %d)' % (name, candid),
+        initial_comment=caption)
+    permalink = None
+    try:
+        f = resp.get('file') or (resp.get('files') or [{}])[0]
+        permalink = f.get('permalink')
+    except Exception:
+        pass
+    return name, permalink
+# <<< PRIME Slack alert button
+
+# [patch] prime-slack-alert-20260719 applied

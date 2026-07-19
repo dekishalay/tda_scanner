@@ -195,6 +195,12 @@
           <button class="btn btn-small" type="submit">&rarr; {{ glabel }}</button>
         </form>
         {% endfor %}
+        {# [patch] prime-slack-alert-20260719 #}
+        <form class="inline" action="/prime/slack_alert" method="post" target="_blank">
+          <input type="hidden" name="candid" value="{{ canddicts.candids[i] }}">
+          {{ csrf() }}
+          <button class="btn btn-small" type="submit">&#128227; Slack</button>
+        </form>
       </div>
     </div>
   </article>
@@ -205,3 +211,5 @@
 {# [patch] wtp-bugfix-20260717 applied #}
 
 {# [patch] wtp-gb-fields-20260717 applied #}
+
+{# [patch] prime-slack-alert-20260719 applied #}

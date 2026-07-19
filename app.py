@@ -524,6 +524,38 @@ def prime_tom_save():
 
 
 # ---------------------------------------------------------------------------
+# PRIME -> Slack alert  [prime_slack_alert]  (patch prime-slack-alert-20260719)
+# Renders the scan-card figure for a candid and posts it to Slack with a
+# caption (alerter, name, mag/filter, coords, field, fpapos). Config in env:
+# SLACK_ALERT_TOKEN|SLACK_BOT_TOKEN, SLACK_ALERT_CHANNEL|SLACK_CHANNEL.
+# ---------------------------------------------------------------------------
+@app.route('/prime/slack_alert', methods=['POST'])
+@login_required
+def prime_slack_alert():
+    import surveys as _s
+    try:
+        candid = int(request.form['candid'])
+    except (KeyError, ValueError):
+        return 'Missing/invalid candid', 400
+    alerter = session.get('user', 'unknown')
+    try:
+        name, permalink = _s.prime_post_slack_alert(SURVEYS['prime'], candid, alerter)
+    except KeyError:
+        abort(404)
+    except Exception as e:
+        app.logger.exception('Slack alert failed for candid=%s', candid)
+        return 'Slack alert failed: %s' % e, 502
+    link = ('<p><a href="%s" target="_blank" rel="noopener">View in Slack</a></p>'
+            % permalink) if permalink else ''
+    return ('<!doctype html><meta charset="utf-8"><title>Slack alert</title>'
+            '<div style="font-family:sans-serif;padding:2em">'
+            '<h2>Posted PRIME alert for %s</h2>'
+            '<p>candid %d posted by %s.</p>%s'
+            '<p><a href="javascript:history.back()">&larr; back</a></p></div>'
+            % (name, candid, alerter, link))
+
+
+# ---------------------------------------------------------------------------
 # PRIME per-source viewer  (by PRIME ID or ra/dec)   [prime_source_viewer]
 # ---------------------------------------------------------------------------
 @app.route('/prime/source')
