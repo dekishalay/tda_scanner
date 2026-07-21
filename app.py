@@ -232,12 +232,17 @@ def run_scan(survey_key, scan_name):
     if request.method == 'GET':
         defaults = dict(spec.get('defaults', SCAN_DEFAULTS.get(scan_name, {})))
         if 'datemax' in defaults:
-            # evaluated per request -- the import-time value goes stale.
-            # Nightly default window: [today - 2 days, today].
-            defaults['datemax'] = datetime.now(UTC).strftime('%Y-%m-%d')
+            # Prefill the datetime-local window with exactly last night in UTC:
+            # [now - 1 day, now]. now is sampled once so the two bounds are
+            # exactly 24 h apart (rendering at MJD 61242.5 -> the builder
+            # resolves the SQL to [61241.5, 61242.5)). datetime-local is
+            # minute-precision, which keeps the span exact; the builder does the
+            # MJD conversion. Typing narrower/wider bounds overrides this.
+            # [patch prime-datetime-window-20260721]
+            _now = datetime.now(UTC)
+            defaults['datemax'] = _now.strftime('%Y-%m-%dT%H:%M')
             if 'datemin' in defaults:
-                defaults['datemin'] = (datetime.now(UTC)
-                    - timedelta(days=2)).strftime('%Y-%m-%d')
+                defaults['datemin'] = (_now - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M')
         return render_template('scan.html', user=session['user'],
             server=socket.gethostname(), timenow=now_str(),
             scan_title=spec.get('title', scan_name),

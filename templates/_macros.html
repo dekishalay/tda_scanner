@@ -47,6 +47,8 @@
     {{ pair_field(f.label, f.name, d[f.name]|default(''), f.suffix|default(''), f.mid|default(''), f.name2, d[f.name2]|default(''), f.suffix2|default('')) }}
   {% elif f.kind == 'daterange' %}
     {{ daterange_field(f.label, f.lo, d[f.lo]|default(''), f.hi, d[f.hi]|default('')) }}
+  {% elif f.kind == 'datetimerange' %}
+    {{ datetimerange_field(f.label, f.lo, d[f.lo]|default(''), f.hi, d[f.hi]|default('')) }}
   {% elif f.kind == 'brstar' %}
     {{ brstar(d) }}
   {% endif %}
@@ -132,6 +134,12 @@
 {% endmacro %}
 
 {# PRIME additions #}
+{# [patch prime-datetime-window-20260721] #}
+{% macro datetimerange_field(label, lo, vlo, hi, vhi) %}
+<label class="field"><span>{{ label }}</span>
+  <input type="datetime-local" name="{{ lo }}" value="{{ vlo }}"> &ndash; <input type="datetime-local" name="{{ hi }}" value="{{ vhi }}">
+</label>
+{% endmacro %}
 {% macro daterange_field(label, lo, vlo, hi, vhi) %}
 <label class="field"><span>{{ label }}</span>
   <input type="date" name="{{ lo }}" value="{{ vlo }}"> &ndash; <input type="date" name="{{ hi }}" value="{{ vhi }}">
@@ -185,6 +193,8 @@
            href="https://www.legacysurvey.org/viewer?ra={{ canddicts.ras[i] }}&dec={{ canddicts.decs[i] }}&zoom=14&mark={{ canddicts.ras[i] }},{{ canddicts.decs[i] }}">LS</a>
         <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
            href="https://simbad.cds.unistra.fr/simbad/sim-coo?Coord={{ canddicts.ras[i] }}%20{{ canddicts.decs[i] }}&Radius=10&Radius.unit=arcsec">SIMBAD</a>
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="/prime/source?sourcename={{ canddicts.names[i]|urlencode }}">Source page</a>
         {% for gk, glabel in [('ulens', '\u03bclens'), ('trans', 'trans'), ('var', 'var')] %}
         <form class="inline" action="/prime/tom_save" method="post" target="_blank">
           <input type="hidden" name="sourcename" value="{{ canddicts.names[i] }}">

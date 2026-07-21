@@ -1131,13 +1131,22 @@ PRIME_DATE_LO = '2023-01-01'
 PRIME_DATE_HI = Time.now().iso[:10]
 
 def _prime_mjd_bound(form, key, default, end=False):
-    """UTC 'YYYY-MM-DD' (date picker) or bare MJD -> MJD; blank -> default.
-    end=True -> end of that UTC day (inclusive upper bound)."""
+    """Parse a UTC bound to MJD. Accepts a datetime-local string
+    'YYYY-MM-DDTHH:MM[:SS]' (the exact instant, end ignored), a date-only
+    'YYYY-MM-DD' (midnight; end=True -> end of that day), or a bare MJD float.
+    Blank -> default (a bare MJD float).  [patch prime-datetime-window-20260721]"""
     s = str(form.get(key, '') or default).strip()
-    if '-' in s:
+    if not s:
+        return float(default)
+    if 'T' in s or (' ' in s and ':' in s):        # datetime -> exact instant
+        iso = s.replace('T', ' ')
+        if iso.count(':') == 1:                     # 'HH:MM' -> pad seconds
+            iso += ':00'
+        return Time(iso, format='iso', scale='utc').mjd
+    if '-' in s:                                    # date only (legacy picker)
         mjd = Time(s, scale='utc').mjd
         return mjd + 1.0 if end else mjd
-    return float(s)
+    return float(s)                                 # bare MJD
 
 
 # >>> PRIME flux panel + sex coords
@@ -1425,12 +1434,14 @@ def prime_nightly(form):
            'numbadweightsci <= %s',
            'neglobe_clust <= %s',
            '(neglobe_clust < 3 OR neglobe_dist >= %s)']
-    # Blank date fields fall back to the nightly default window
-    # [today - 2 d, today], NOT full history; type an explicit early
-    # datemin for a full-survey scan. Bare-MJD floats take the no-dash
-    # branch of _prime_mjd_bound.
-    params = [_prime_mjd_bound(form, 'datemin', Time.now().mjd - 2.0),
-              _prime_mjd_bound(form, 'datemax', Time.now().iso[:10], end=True),
+    # Blank date fields fall back to exactly last night: MJD [now-1, now]
+    # (sampled once so the fallback window is exactly 1.0 d, matching the
+    # prefilled datetime-local defaults). The form normally submits UTC
+    # datetime-local strings, which the bound parser turns into exact MJDs.
+    # Type an early datemin for a full-survey scan.  [patch prime-datetime-window-20260721]
+    _now_mjd = Time.now().mjd
+    params = [_prime_mjd_bound(form, 'datemin', _now_mjd - 1.0),
+              _prime_mjd_bound(form, 'datemax', _now_mjd, end=True),
               f('agelowlim'), f('agehighlim'), f('scorrpeak'), f('chi2hi'),
               f('fwhmlo'), f('fwhmhi'), f('numneghi'), f('bwrefhi'),
               f('bwscihi'),
@@ -1442,7 +1453,7 @@ def prime_nightly(form):
 
 
 _PF_NIGHTLY = [
-    {'kind': 'daterange', 'label': 'Date (UTC)', 'lo': 'datemin', 'hi': 'datemax'},
+    {'kind': 'datetimerange', 'label': 'Date-time (UTC)', 'lo': 'datemin', 'hi': 'datemax'},
     {'kind': 'range', 'label': 'Age (L0)', 'lo': 'agelowlim', 'hi': 'agehighlim',
      'suffix': 'days'},
     {'kind': 'num', 'label': 'Scorr peak \u2265', 'name': 'scorrpeak'},
