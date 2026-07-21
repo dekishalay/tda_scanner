@@ -561,9 +561,38 @@ def prime_slack_alert():
 @app.route('/prime/source')
 @login_required
 def prime_source_index():
+    # GET with ?sourcename= (or ?rasearch=&decsearch=) renders results
+    # directly, so flagged-list names can deep-link here; bare GET shows
+    # the search form.  [patch prime-flagged-20260719]
+    if request.args.get('sourcename') or (
+            request.args.get('rasearch') and request.args.get('decsearch')):
+        try:
+            template, ctx = surveys.build_prime_source_context(
+                SURVEYS['prime'], request.args)
+        except (KeyError, ValueError, TypeError):
+            app.logger.exception('build_prime_source_context (GET) failed')
+            abort(400)
+        return render_template(template, user=session['user'],
+            server=socket.gethostname(), timenow=now_str(), **ctx)
     return render_template('prime_source.html', user=session['user'],
         server=socket.gethostname(), timenow=now_str(),
         defpardict=surveys.PRIME_SOURCE_DEFAULTS)
+
+@app.route('/prime/flagged')
+@login_required
+def prime_flagged():
+    import surveys as _s
+    list_name = request.args.get('list', _s.PRIME_FLAGGED_TARGETLIST)
+    error, rows = None, []
+    try:
+        rows = _s.prime_flagged_rows(list_name)
+    except Exception as e:
+        app.logger.exception('flagged list fetch failed')
+        error = str(e)
+    return render_template('prime_flagged.html', user=session['user'],
+        server=socket.gethostname(), timenow=now_str(),
+        rows=rows, error=error, list_name=list_name,
+        label=_s.PRIME_FLAGGED_LABEL)
 
 @app.route('/prime/source_search', methods=['POST'])
 @login_required

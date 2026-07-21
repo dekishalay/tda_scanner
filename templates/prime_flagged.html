@@ -1,0 +1,37 @@
+{# patch prime-flagged-20260719 #}
+{% extends 'base.html' %}
+{% block title %}Flagged microlensing{% endblock %}
+{% block content %}
+<style>
+  .flagged-table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .flagged-table th, .flagged-table td { padding: 6px 10px; border-bottom: 1px solid #ddd; text-align: left; }
+  .flagged-table th { background: #f4f4f4; position: sticky; top: 0; }
+  .flagged-table tr:hover { background: #fafafa; }
+  .flagged-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .flagged-missing { color: #999; font-size: 12px; }
+  .flagged-err { color: #b00; padding: 1em; }
+</style>
+
+<h1>{{ label }} <small style="font-weight:400;color:#888">(TOM list {{ list_name }})</small></h1>
+
+{% if error %}<p class="flagged-err">Could not load the TOM list: {{ error }}</p>{% endif %}
+<p class="count">{{ rows|length }} source{{ '' if rows|length == 1 else 's' }}</p>
+
+<table class="flagged-table">
+  <thead><tr>
+    <th>Name</th><th>RA</th><th>Dec</th><th>GB field</th><th>fpapos</th><th>Peak date (UTC)</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{% if r.in_prime %}<a href="/prime/source?sourcename={{ r.name|urlencode }}">{{ r.name }}</a>{% else %}{{ r.name }} <span class="flagged-missing">(not in PRIME db)</span>{% endif %}</td>
+      <td class="num">{% if r.ra is not none %}{{ '%.6f'|format(r.ra) }}{% else %}&mdash;{% endif %}</td>
+      <td class="num">{% if r.dec is not none %}{{ '%.6f'|format(r.dec) }}{% else %}&mdash;{% endif %}</td>
+      <td>{% if r.field is not none %}{{ r.field }}{% else %}&mdash;{% endif %}</td>
+      <td>{% if r.fpapos is not none %}C{{ r.fpapos }}{% else %}&mdash;{% endif %}</td>
+      <td>{% if r.peak_date %}{{ r.peak_date }}{% else %}&mdash;{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

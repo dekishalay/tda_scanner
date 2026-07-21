@@ -21,6 +21,7 @@ import logging
 import time
 import threading
 import requests
+import re
 from dataclasses import dataclass, field as dc_field
 from typing import Callable, Optional
 
@@ -36,6 +37,9 @@ from astropy.stats import sigma_clipped_stats
 
 THUMBDIR = os.environ.get('WTP_THUMBNAIL_DIR',
 	'/home/kde/Packages/flask_app/static/thumbnails/')
+
+# Best-effort total-count timeout for scan pagination (see run_candidate_query).
+COUNT_TIMEOUT_MS = int(os.environ.get('WTP_COUNT_TIMEOUT_MS', '8000'))
 
 # ----------------------------------------------------------------------------
 # Core types
@@ -162,6 +166,19 @@ def run_candidate_query(survey, where_sql, where_params, form,
 	else:
 		sql = ('SELECT %s FROM %s WHERE %s ORDER BY %s %s OFFSET %%s LIMIT %%s'
 			% (', '.join(cols), from_clause, where_sql, col, direction))
+	# Total-count query for pagination: same FROM/WHERE, no ORDER/OFFSET/
+	# LIMIT. name_join surveys count DISTINCT source key (matches the
+	# DISTINCT ON dedup so pages line up); others count rows. Best-effort
+	# under a statement timeout -- a scan must never hang or fail just to
+	# show a page count, so on timeout/error total is None and the macro
+	# falls back to the page count.
+	count_params = list(extra_join_params or []) + list(where_params)
+	if survey.name_join:
+		count_key = 'COALESCE(sn.name, %s.%s::text)' % (survey.alias, survey.id_col)
+		count_sql = ('SELECT count(DISTINCT %s) AS n FROM %s WHERE %s'
+			% (count_key, from_clause, where_sql))
+	else:
+		count_sql = 'SELECT count(*) AS n FROM %s WHERE %s' % (from_clause, where_sql)
 	conn, cur = survey.open_cursor()
 	try:
 		allparams = (list(extra_join_params or []) + list(where_params)
@@ -169,7 +186,21 @@ def run_candidate_query(survey, where_sql, where_params, form,
 		qstr = cur.mogrify(sql, allparams).decode()
 		logging.getLogger(__name__).info(qstr)
 		cur.execute(sql, allparams)
-		return cur.fetchall(), qstr
+		rows = cur.fetchall()
+		total = None
+		try:
+			cur.execute('SET statement_timeout = %s', (COUNT_TIMEOUT_MS,))
+			cur.execute(count_sql, count_params)
+			total = int(cur.fetchone()['n'])
+		except Exception:
+			logging.getLogger(__name__).warning(
+				'page-count query failed/timeout; total hidden', exc_info=True)
+		finally:
+			try:
+				cur.execute('SET statement_timeout = 0')   # reset on pooled conn
+			except Exception:
+				pass
+		return rows, qstr, total
 	finally:
 		survey.close_cursor(conn, cur)
 
@@ -394,11 +425,21 @@ def build_scan_context(survey, scan_name, form):
 	join, join_params = spec.get('join'), []
 	if callable(join):
 		join, join_params = join(form)
-	out, qstr = run_candidate_query(survey, where_sql, params, form, extra_join=join,
+	out, qstr, total = run_candidate_query(survey, where_sql, params, form, extra_join=join,
 		extra_join_params=join_params, extra_select=spec.get('extra'))
+	skip = int(float(form.get('skipnum', 0)))
+	candlim = max(1, min(int(form.get('candlim', 200)), 1000))
 	reqcopy = form.to_dict()
-	reqcopy['skipnum'] = int(float(form.get('skipnum', 0))) + len(out)
+	reqcopy['skipnum'] = skip + len(out)
 	canddicts = serialize_candidates(survey, out)
+	# Pagination display, stashed on canddicts and read by the card macros
+	# (same channel as coords_sex / fr_ex). total is None -> macro hides it.
+	import math
+	canddicts['pg_total'] = total
+	canddicts['pg_start'] = skip
+	if total is not None:
+		canddicts['pg_page'] = skip // candlim + 1
+		canddicts['pg_npages'] = max(1, math.ceil(total / candlim))
 	ctx = dict(numcands=len(canddicts['candids']), canddicts=canddicts, defpardict=reqcopy,
 		scan_title=spec.get('title', scan_name),
 		scan_fields=spec.get('fields', []),
@@ -2770,3 +2811,179 @@ def prime_post_slack_alert(survey, candid, alerter):
 # <<< PRIME Slack alert button
 
 # [patch] prime-slack-alert-20260719 applied
+
+
+# >>> PRIME flagged-microlensing list (TOM targetlist)  [prime-flagged-20260719]
+# Read-only listing of a TOM target list (default targetlist__name=5, the PRIME
+# microlensing group), enriched from PRIME with each source's GB field, fpapos
+# and the UTC date of its PEAK MAGNITUDE. Peak = brightest forced-photometry
+# detection (max diff flux = min mag), using the SAME SNR floor + per-band
+# staterr outlier mask as the per-source viewer, so the reported date matches
+# the viewer's green peak marker. Backs /prime/flagged; names deep-link to the
+# per-source viewer. Uses TOM_BASE_URL / TOM_TOKEN / _TOM_HDRS (uploader).
+PRIME_FLAGGED_TARGETLIST = os.environ.get('PRIME_FLAGGED_TARGETLIST', '5')
+PRIME_FLAGGED_LABEL = os.environ.get('PRIME_FLAGGED_LABEL', 'Flagged microlensing')
+
+
+def _flagged_flt(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# [patch prime-flagged-session-20260719] TOM session login -- targetlist__name is a SESSION-SCOPED
+# ChoiceField: anon/token requests get an empty choice set and are rejected
+# ("Select a valid choice"). So log in with web creds and reuse the cookie.
+# Creds from env (NOT the API token): TOM_WEB_USER / TOM_WEB_PASS.
+TOM_WEB_USER = os.environ.get('TOM_WEB_USER', '')
+TOM_WEB_PASS = os.environ.get('TOM_WEB_PASS', '')
+_TOM_SESSION = {'s': None}
+_TOM_SESSION_LOCK = threading.Lock()
+
+
+def _tom_login():
+    """Return a requests.Session logged into irtom, or raise RuntimeError."""
+    if not (TOM_BASE_URL and TOM_WEB_USER and TOM_WEB_PASS):
+        raise RuntimeError('TOM web login not configured '
+                           '(TOM_WEB_USER / TOM_WEB_PASS)')
+    s = requests.Session()
+    s.verify = False
+    login_url = '%s/accounts/login/' % TOM_BASE_URL
+    r = s.get(login_url, timeout=30)
+    csrf = s.cookies.get('csrftoken')
+    if not csrf:
+        m = re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', r.text)
+        csrf = m.group(1) if m else ''
+    s.post(login_url, timeout=30, headers={'Referer': login_url},
+           data={'username': TOM_WEB_USER, 'password': TOM_WEB_PASS,
+                 'csrfmiddlewaretoken': csrf})
+    if 'sessionid' not in s.cookies:
+        raise RuntimeError('TOM login failed (no sessionid; check '
+                           'TOM_WEB_USER / TOM_WEB_PASS)')
+    return s
+
+
+def _tom_session():
+    with _TOM_SESSION_LOCK:
+        if _TOM_SESSION['s'] is None:
+            _TOM_SESSION['s'] = _tom_login()
+        return _TOM_SESSION['s']
+
+
+def _tom_session_reset():
+    with _TOM_SESSION_LOCK:
+        _TOM_SESSION['s'] = None
+
+
+def prime_tom_fetch_targetlist(list_name):
+    """Every TOM target in target list `list_name`, via the session-scoped
+    targetlist__name filter (format=json). Logs in on first use, reuses the
+    session cookie, re-logs-in once on a 401/403 (expired session). Follows
+    next links. Raises RuntimeError on config/HTTP/login failure."""
+    url = '%s/api/targets/' % TOM_BASE_URL
+    params = {'format': 'json', 'targetlist__name': list_name, 'limit': 100}
+    out = []
+    relogged = False
+    for _ in range(500):
+        s = _tom_session()
+        r = s.get(url, params=params, timeout=30)
+        if r.status_code in (401, 403) and not relogged:
+            _tom_session_reset(); relogged = True
+            continue
+        if r.status_code != 200:
+            raise RuntimeError('TOM targets returned %d: %s'
+                               % (r.status_code, r.text[:200]))
+        j = r.json()
+        results = j.get('results', []) if isinstance(j, dict) else (j or [])
+        for t in results:
+            out.append({'id': t.get('id'), 'name': t.get('name'),
+                        'ra': t.get('ra'), 'dec': t.get('dec')})
+        nxt = j.get('next') if isinstance(j, dict) else None
+        if not nxt:
+            break
+        url, params = nxt, None
+    return out
+
+
+def _prime_peak_mag_mjd(cur, primeid):
+    """MJD of the brightest forced-photometry detection for this source
+    (max diff flux = min mag). Same selection as the per-source viewer's peak:
+    per-band staterr outlier mask + SNR floor, fall back to any kept finite
+    flux, else None. Returned MJD is converted to a UTC date by the caller."""
+    cur.execute('SELECT mjd, filter2, forcediffimflux, forcediffimfluxstaterr, '
+                'forcediffmagpsf FROM forced_photometry '
+                'WHERE primeid = %s ORDER BY mjd ASC;', (primeid,))
+    out = cur.fetchall()
+    if not out:
+        return None
+    mjd = _farr(out, 'mjd')
+    bid = np.array([PRIME_FILTER_BAND.get(o['filter2'], 0) for o in out])
+    flux = _farr(out, 'forcediffimflux')
+    ferr = _farr(out, 'forcediffimfluxstaterr')
+    mag = _farr(out, 'forcediffmagpsf')
+    keep = _prime_band_outlier_mask(bid, ferr)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        snr = np.where(ferr > 0, flux / ferr, np.nan)
+    isdet = (np.isfinite(snr) & (snr >= PRIME_FP_SNR)
+             & np.isfinite(mag) & (mag > 0))
+    pk = keep & isdet & np.isfinite(flux)
+    if not pk.any():
+        pk = keep & np.isfinite(flux)
+    if not pk.any():
+        return None
+    idx = int(np.argmax(np.where(pk, flux, -np.inf)))
+    return float(mjd[idx])
+
+
+def prime_flagged_rows(list_name=None):
+    """TOM list joined to PRIME. Row: name, ra, dec, field, fpapos, peak_mjd,
+    peak_date (UTC), primeid, in_prime. Sorted by peak date desc (undetected /
+    not-in-PRIME last)."""
+    list_name = list_name or PRIME_FLAGGED_TARGETLIST
+    targets = prime_tom_fetch_targetlist(list_name)
+    by_name = {t['name']: t for t in targets if t.get('name')}
+    names = list(by_name.keys())
+    rows = []
+    if not names:
+        return rows
+    conn, cur = _prime_open()
+    try:
+        cur.execute('SELECT primeid, name, ra, dec FROM sources '
+                    'WHERE name = ANY(%s);', (names,))
+        srcs = {r['name']: r for r in cur.fetchall()}
+        for nm in names:
+            s = srcs.get(nm)
+            t = by_name[nm]
+            field = fpapos = peak_mjd = None
+            if s is not None:
+                ra, dec, primeid = float(s['ra']), float(s['dec']), s['primeid']
+                # field/fpapos from the peak-scorr candidate (a location);
+                # peak DATE from forced-phot peak mag (a time) -- see helper.
+                cur.execute('SELECT field, fpapos FROM candidates '
+                            'WHERE q3c_radial_query(ra, dec, %s, %s, %s) '
+                            'AND ispos = 1 ORDER BY scorr_peak DESC LIMIT 1;',
+                            (ra, dec, PRIME_CMRADIUS))
+                pk = cur.fetchone()
+                if pk:
+                    field, fpapos = pk['field'], pk['fpapos']
+                peak_mjd = _prime_peak_mag_mjd(cur, primeid)
+            else:
+                ra = _flagged_flt(t.get('ra'))
+                dec = _flagged_flt(t.get('dec'))
+                primeid = None
+            peak_date = ''
+            if peak_mjd is not None:
+                try:
+                    peak_date = Time(float(peak_mjd), format='mjd').iso[:10]
+                except Exception:
+                    peak_date = ''
+            rows.append({'name': nm, 'ra': ra, 'dec': dec,
+                         'field': field, 'fpapos': fpapos,
+                         'peak_mjd': peak_mjd, 'peak_date': peak_date,
+                         'primeid': primeid, 'in_prime': s is not None})
+    finally:
+        _prime_close(conn, cur)
+    rows.sort(key=lambda d: (d['peak_mjd'] is None, -(d['peak_mjd'] or 0.0)))
+    return rows
+# <<< PRIME flagged-microlensing list

@@ -79,7 +79,7 @@
 {% endmacro %}
 
 {% macro candidate_cards(canddicts, numcands, user) %}
-<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}</p>
+<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}{% if canddicts.pg_total is defined and canddicts.pg_total is not none %} of {{ canddicts.pg_total }} total &middot; page {{ canddicts.pg_page }} of {{ canddicts.pg_npages }}{% endif %}</p>
 <div class="cards">
 {% for i in range(0, numcands) %}
   <article class="card">
@@ -139,7 +139,7 @@
 {% endmacro %}
 
 {% macro prime_candidate_cards(canddicts, numcands, user) %}
-<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}</p>
+<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}{% if canddicts.pg_total is defined and canddicts.pg_total is not none %} of {{ canddicts.pg_total }} total &middot; page {{ canddicts.pg_page }} of {{ canddicts.pg_npages }}{% endif %}</p>
 <div class="cards">
 {% for i in range(0, numcands) %}
   <article class="card">
