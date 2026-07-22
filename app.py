@@ -259,6 +259,59 @@ def run_scan(survey_key, scan_name):
         server=socket.gethostname(), timenow=now_str(), **ctx)
 
 # ---------------------------------------------------------------------------
+# LSST: nearby-galaxy transients (galaxy_crossmatch_matches, LSST_DSN).
+# Standalone route -- LSST isn't in SURVEYS/run_candidate_query (see the
+# "ADAPTER 3: LSST" comment in surveys.py for why), so it gets its own
+# GET/POST view and its own cutout route below (objectid is a string, not
+# an int candid, and its image + light curve come from Babamul on demand
+# rather than this app's own cutout/forced-photometry tables).
+# ---------------------------------------------------------------------------
+@app.route('/lsst/nearby_galaxies', methods=['GET', 'POST'])
+@login_required
+def lsst_nearby_galaxies():
+    if request.method == 'GET':
+        defaults = dict(surveys.LSST_NEARBY_GALAXIES_DEFAULTS)
+        _now = datetime.now(UTC)
+        defaults['datemax'] = _now.strftime('%Y-%m-%d')
+        defaults['datemin'] = (_now - timedelta(days=30)).strftime('%Y-%m-%d')
+        return render_template('lsst_scan.html', user=session['user'],
+            server=socket.gethostname(), timenow=now_str(),
+            scan_title='LSST: Nearby-galaxy transients',
+            scan_fields=surveys.LSST_NEARBY_GALAXIES_FIELDS,
+            scan_action='/lsst/nearby_galaxies',
+            scan_sorts=surveys.LSST_SORTS,
+            defpardict=defaults, numcands=0, canddicts=None)
+    try:
+        ctx = surveys.build_lsst_scan_context(request.form)
+    except (KeyError, ValueError, TypeError):
+        app.logger.exception('build_lsst_scan_context failed')
+        abort(400)
+    return render_template('lsst_scan.html', user=session['user'],
+        server=socket.gethostname(), timenow=now_str(), **ctx)
+
+@lru_cache(maxsize=1024)
+def _cached_lsst_cutout(objectid, distmod, day):
+    return surveys.lsst_candidate_png(objectid, distmod=distmod)
+
+@app.route('/lsst/cutout/<objectid>.png')
+@login_required
+def lsst_cutout(objectid):
+    # distmod (mag - abs_mag) rides along from the card's cutout URL (see
+    # lsst_serialize) so the light-curve panel can draw a right-hand
+    # absolute-magnitude axis without a second DB round-trip here.
+    distmod = request.args.get('distmod', type=float)
+    day = _render_day()
+    etag = '"lsst-%s-%s-%s-%s"' % (objectid, distmod, CUTOUT_RENDER_VERSION, day)
+    headers = {'Cache-Control': 'private, max-age=0, must-revalidate', 'ETag': etag}
+    if request.headers.get('If-None-Match') == etag:
+        return Response(status=304, headers=headers)
+    try:
+        png = _cached_lsst_cutout(objectid, distmod, day)
+    except KeyError:
+        abort(404)
+    return Response(png, mimetype='image/png', headers=headers)
+
+# ---------------------------------------------------------------------------
 # Custom SQL scan: user writes a SELECT, sees a candidate count, and only on
 # confirm gets the normal scan.html results page. Query execution itself
 # (read-only enforcement, wrapping, caching the resolved candids under a
