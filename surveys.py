@@ -445,6 +445,8 @@ def build_scan_context(survey, scan_name, form):
 		scan_fields=spec.get('fields', []),
 		scan_query=qstr,
 		scan_action='/%s/scan/%s' % (survey.key, scan_name),
+		scan_name=scan_name,
+		tom_listname=NEOWISE_TOM_LISTS.get(scan_name),
 		ascii_list=ascii_name_list(canddicts))
 	return spec['template'], ctx
 
@@ -1568,6 +1570,131 @@ def prime_tom_upload_photometry(target_id, primeid):
 # <<< PRIME TOM upload
 
 
+# >>> NEOWISE TOM upload
+# Buttons on every WTP/WTPX scan card ('Tom') POST to /wtp/tom_save (app.py).
+# Each scanning tab maps to its own TOM target list -- NEOWISE_TOM_LISTS below
+# -- rather than a user-picked group as with PRIME (PRIME_TOM_LISTS). Uses the
+# same TOM_BASE_URL / TOM_TOKEN / _TOM_HDRS as the PRIME uploader above.
+# Photometry: forced diff + stack photometry (via wtp_fetch_forced, the exact
+# same query/detection convention the viewer uses -- FP_SNR_THRESH, mag
+# columns already computed in forced_photometry, no on-the-fly ZP math like
+# PRIME needs). The 'xmatch' (ZTF/LSST) tab additionally uploads broker
+# photometry for any crossmatched ZTF/LSST name, restricted to positive
+# (isdiffpos != False) detections only -- negative/subtraction-artifact
+# points and non-detections are not uploaded.
+NEOWISE_TOM_GROUP_ID = int(os.environ.get('NEOWISE_TOM_GROUP_ID', '2'))
+NEOWISE_TOM_GROUP_NAME = os.environ.get('NEOWISE_TOM_GROUP_NAME', 'NEOWISE')
+
+NEOWISE_TOM_LISTS = {
+    'hostless': 'neowise_hostless',
+    'hosted': 'neowise_hosted',
+    'clu': 'neowise_nearby_galaxies',
+    'nuclear': 'neowise_nuclear',
+    'smc': 'neowise_magellanic',
+    'lmc': 'neowise_magellanic',
+    'm31': 'neowise_m31',
+    'yso': 'neowise_yso',
+    'xmatch': 'neowise_ztf_lsst',
+}
+
+
+def neowise_tom_get_or_create_target(name, ra, dec, scan_name):
+    """Return (target_id, created_bool); raises on TOM failure."""
+    listname = NEOWISE_TOM_LISTS[scan_name]
+    r = requests.get('%s/api/targets/' % TOM_BASE_URL, params={'name': name},
+                     headers=_TOM_HDRS, timeout=30, verify=False)
+    if r.status_code == 200 and r.json().get('results'):
+        return int(r.json()['results'][0]['id']), False
+    r = requests.post('%s/api/targets/' % TOM_BASE_URL, headers=_TOM_HDRS,
+                      timeout=30, verify=False,
+                      json={'name': name, 'type': 'SIDEREAL',
+                            'ra': float(ra), 'dec': float(dec),
+                            'groups': [{'id': NEOWISE_TOM_GROUP_ID,
+                                       'name': NEOWISE_TOM_GROUP_NAME}],
+                            'target_lists': [{'name': listname}]})
+    if r.status_code != 201:
+        raise RuntimeError('TOM target create failed %d: %s'
+                           % (r.status_code, r.text[:200]))
+    return int(r.json()['id']), True
+
+
+def _neowise_tom_post(target_id, mjd, data_type, value):
+    try:
+        r = requests.post('%s/api/reduceddatums/' % TOM_BASE_URL,
+                          headers=_TOM_HDRS, timeout=30, verify=False,
+                          json={'target': target_id, 'data_type': data_type,
+                                'timestamp': Time(float(mjd), format='mjd').isot + 'Z',
+                                'value': value})
+        return r.status_code == 201
+    except Exception:
+        return False
+
+
+NEOWISE_TOM_BANDNAME = {1: 'W1', 2: 'W2'}
+
+
+def neowise_tom_upload_photometry(target_id, ra, dec, candid=None, scan_name=None):
+    """Diff + stack forced photometry -> TOM reduceddatums, plus (xmatch tab
+    only) positive-only ZTF/LSST broker photometry. Background thread; own
+    cursor."""
+    conn, cur = _wtp_open()
+    try:
+        fp = wtp_fetch_forced(cur, {'ra': ra, 'dec': dec})
+        ext = None
+        if scan_name == 'xmatch' and candid is not None:
+            ext = _wtpx_ext_names(cur, {'candid': candid})
+    finally:
+        _wtp_close(conn, cur)
+
+    n_ok = n_fail = 0
+    if fp is not None:
+        for i in range(len(fp['mjd'])):
+            band = NEOWISE_TOM_BANDNAME.get(int(fp['bandid'][i]))
+            if band is None:
+                continue
+            mjd = fp['mjd'][i]
+            if fp['isdet'][i] and np.isfinite(fp['mag'][i]):
+                value = {'magnitude': float(fp['mag'][i]),
+                         'error': float(abs(fp['magerr'][i])),
+                         'filter': '%s_diff' % band}
+            elif np.isfinite(fp['limmag'][i]):
+                value = {'limit': float(fp['limmag'][i]), 'filter': '%s_diff' % band}
+            else:
+                continue
+            ok = _neowise_tom_post(target_id, mjd, 'photometry', value)
+            n_ok += ok; n_fail += (not ok)
+            # Stack forced photometry: detections only -- no stack limiting
+            # magnitude is stored, matching the viewer's convention.
+            if fp['sisdet'][i] and np.isfinite(fp['smag'][i]):
+                svalue = {'magnitude': float(fp['smag'][i]),
+                          'error': float(abs(fp['smagerr'][i])),
+                          'filter': '%s_stack' % band}
+                ok = _neowise_tom_post(target_id, mjd, 'stack_photometry', svalue)
+                n_ok += ok; n_fail += (not ok)
+
+    if ext:
+        for s, k in (('ztf', 'ztfname'), ('lsst', 'lsstname')):
+            extname = ext.get(k)
+            if not extname:
+                continue
+            elc = babamul_get_lightcurve(s, extname)
+            if elc is None or not len(elc['mjd']):
+                continue
+            isneg = elc.get('isneg', np.zeros(len(elc['mjd']), dtype=bool))
+            pos_det = elc['isdet'] & ~isneg
+            for j in np.nonzero(pos_det)[0]:
+                value = {'magnitude': float(elc['mag'][j]),
+                         'error': float(abs(elc['magerr'][j])),
+                         'filter': '%s_%s' % (s, elc['filt'][j])}
+                ok = _neowise_tom_post(target_id, elc['mjd'][j], 'photometry', value)
+                n_ok += ok; n_fail += (not ok)
+
+    logging.getLogger(__name__).info('NEOWISE TOM phot ra=%.6f dec=%.6f scan=%s '
+                                     '-> target %s: %d ok, %d failed',
+                                     ra, dec, scan_name, target_id, n_ok, n_fail)
+# <<< NEOWISE TOM upload
+
+
 # >>> PRIME per-source viewer (lookup by primeid or ra/dec) [prime_render_source_png]
 # Standalone source page mirroring WTP search: resolve the sources row, render
 # its forced-photometry LC directly from primeid (no candid needed) as
@@ -2242,6 +2369,30 @@ def build_prime_source_context(survey, form):
         ctx['tom_ex'] = ctx['alert_ex'] = False
     return template, ctx
 # <<< PRIME badges
+
+
+# >>> NEOWISE TOM badges
+# Chain onto build_scan_context so WTP/WTPX scan cards gain a tom_ids/tom_ex
+# array aligned with candids -- same idea as the PRIME badge chain above.
+# prime_tom_has_name/_prime_tom_ids_parallel have no PRIME-specific behavior
+# (just a name -> TOM target id lookup, TTL-cached), so they're reused as-is
+# rather than duplicated for NEOWISE.
+_prev_bsc_neowise_badges = build_scan_context
+def build_scan_context(survey, scan_name, form):
+    template, ctx = _prev_bsc_neowise_badges(survey, scan_name, form)
+    try:
+        if getattr(survey, 'key', None) in ('wtp', 'wtpx'):
+            cd = ctx.get('canddicts')
+            if cd and len(cd.get('ras', [])):
+                names = list(cd.get('names', []))
+                tids = _prime_tom_ids_parallel(names)
+                cd['tom_ids'] = np.array(tids, dtype=object)
+                cd['tom_ex'] = np.array([t is not None for t in tids], dtype=bool)
+                ctx['tom_web_base'] = (TOM_BASE_URL or '')
+    except Exception as _e:
+        logging.getLogger(__name__).warning('neowise badge annotate failed: %s', _e)
+    return template, ctx
+# <<< NEOWISE TOM badges
 
 
 # [patch] wtp-bugfix-20260717 applied

@@ -529,6 +529,38 @@ def prime_tom_save():
 
 
 # ---------------------------------------------------------------------------
+# NEOWISE (WTP/WTPX) -> TOM save
+# One button per scan card, no group picker: the scan tab itself (scan_name,
+# a hidden field set from ctx['tom_listname'] in surveys.build_scan_context)
+# determines the target list via surveys.NEOWISE_TOM_LISTS. The 'xmatch'
+# (ZTF/LSST) tab also uploads any crossmatched ZTF/LSST photometry.
+# ---------------------------------------------------------------------------
+@app.route('/wtp/tom_save', methods=['POST'])
+@login_required
+def wtp_tom_save():
+    import threading
+    import surveys as _s
+    scan_name = request.form.get('scan_name', '')
+    if scan_name not in _s.NEOWISE_TOM_LISTS:
+        return 'TOM list not configured for scan %r (NEOWISE_TOM_LISTS)' % scan_name, 400
+    name = request.form['sourcename']
+    ra = float(request.form['ra'])
+    dec = float(request.form['dec'])
+    try:
+        tid, created = _s.neowise_tom_get_or_create_target(name, ra, dec, scan_name)
+    except Exception as e:
+        app.logger.exception('NEOWISE TOM save failed for %s', name)
+        return 'TOM save failed: %s' % e, 502
+    candid = request.form.get('candid')
+    candid = int(candid) if candid else None
+    threading.Thread(target=_s.neowise_tom_upload_photometry,
+                     args=(tid, ra, dec, candid, scan_name), daemon=True).start()
+    return render_template('get_tom.html', sourcename=name, created=created,
+                           group=_s.NEOWISE_TOM_LISTS[scan_name],
+                           tom_url=_s.TOM_BASE_URL, target_id=tid)
+
+
+# ---------------------------------------------------------------------------
 # PRIME -> Slack alert  [prime_slack_alert]  (patch prime-slack-alert-20260719)
 # Renders the scan-card figure for a candid and posts it to Slack with a
 # caption (alerter, name, mag/filter, coords, field, fpapos). Config in env:

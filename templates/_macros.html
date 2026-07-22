@@ -80,7 +80,7 @@
 </form>
 {% endmacro %}
 
-{% macro candidate_cards(canddicts, numcands, user) %}
+{% macro candidate_cards(canddicts, numcands, user, scan_name=none, tom_listname=none, tom_web_base=none) %}
 <p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}{% if canddicts.pg_total is defined and canddicts.pg_total is not none %} of {{ canddicts.pg_total }} total &middot; page {{ canddicts.pg_page }} of {{ canddicts.pg_npages }}{% endif %}</p>
 <div class="cards">
 {% for i in range(0, numcands) %}
@@ -90,6 +90,7 @@
       <div class="card-head">
         <span class="name">{{ canddicts.names[i] }}</span>
         <span class="coords">{{ '%.5f'|format(canddicts.ras[i]) }}, {{ '%.5f'|format(canddicts.decs[i]) }}</span>
+        {% if canddicts.tom_ids is defined and canddicts.tom_ids[i] %}<a class="badge-tom" target="_blank" rel="noopener" href="{{ tom_web_base }}/targets/{{ canddicts.tom_ids[i] }}" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600;margin-left:6px;color:#fff;background:#166534;text-decoration:none">in TOM</a>{% endif %}
       </div>
       <dl class="meta-grid">
         <div><dt>psf_mag</dt><dd>{{ '%.2f'|format(canddicts.psf_mags[i]) }}</dd></div>
@@ -126,6 +127,18 @@
           {{ csrf() }}
           <button class="btn btn-small" type="submit">{{ 'On Fritz \u2713' if (canddicts.fr_ex is defined and canddicts.fr_ex[i]) else 'Fritz' }}</button>
         </form>
+        {% if tom_listname %}
+        <form class="inline" action="/wtp/tom_save" method="post" target="_blank">
+          <input type="hidden" name="candid" value="{{ canddicts.candids[i] }}">
+          <input type="hidden" name="sourcename" value="{{ canddicts.names[i] }}">
+          <input type="hidden" name="ra" value="{{ canddicts.ras[i] }}">
+          <input type="hidden" name="dec" value="{{ canddicts.decs[i] }}">
+          <input type="hidden" name="scan_name" value="{{ scan_name }}">
+          <input type="hidden" name="user" value="{{ user }}">
+          {{ csrf() }}
+          <button class="btn btn-small" type="submit">Tom</button>
+        </form>
+        {% endif %}
       </div>
     </div>
   </article>
