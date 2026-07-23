@@ -1555,7 +1555,9 @@ def prime_tom_get_or_create_target(name, ra, dec, group_key):
     r = requests.get('%s/api/targets/' % TOM_BASE_URL, params={'name': name},
                      headers=_TOM_HDRS, timeout=30, verify=False)
     if r.status_code == 200 and r.json().get('results'):
-        return int(r.json()['results'][0]['id']), False
+        target = r.json()['results'][0]
+        _tom_ensure_in_list(target, listname)
+        return int(target['id']), False
     _tom_gid = int(os.environ.get('PRIME_TOM_GROUP_ID', '3'))
     _tom_gname = os.environ.get('PRIME_TOM_GROUP_NAME', 'PRIME')
     r = requests.post('%s/api/targets/' % TOM_BASE_URL, headers=_TOM_HDRS,
