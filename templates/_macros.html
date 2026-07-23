@@ -80,7 +80,7 @@
 </form>
 {% endmacro %}
 
-{% macro candidate_cards(canddicts, numcands, user) %}
+{% macro candidate_cards(canddicts, numcands, user, scan_name=none, tom_listname=none, tom_web_base=none) %}
 <p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}{% if canddicts.pg_total is defined and canddicts.pg_total is not none %} of {{ canddicts.pg_total }} total &middot; page {{ canddicts.pg_page }} of {{ canddicts.pg_npages }}{% endif %}</p>
 <div class="cards">
 {% for i in range(0, numcands) %}
@@ -90,6 +90,7 @@
       <div class="card-head">
         <span class="name">{{ canddicts.names[i] }}</span>
         <span class="coords">{{ '%.5f'|format(canddicts.ras[i]) }}, {{ '%.5f'|format(canddicts.decs[i]) }}</span>
+        {% if canddicts.tom_ids is defined and canddicts.tom_ids[i] %}<a class="badge-tom" target="_blank" rel="noopener" href="{{ tom_web_base }}/targets/{{ canddicts.tom_ids[i] }}" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600;margin-left:6px;color:#fff;background:#166534;text-decoration:none">in TOM</a>{% endif %}
       </div>
       <dl class="meta-grid">
         <div><dt>psf_mag</dt><dd>{{ '%.2f'|format(canddicts.psf_mags[i]) }}</dd></div>
@@ -126,6 +127,18 @@
           {{ csrf() }}
           <button class="btn btn-small" type="submit">{{ 'On Fritz \u2713' if (canddicts.fr_ex is defined and canddicts.fr_ex[i]) else 'Fritz' }}</button>
         </form>
+        {% if tom_listname %}
+        <form class="inline" action="/wtp/tom_save" method="post" target="_blank">
+          <input type="hidden" name="candid" value="{{ canddicts.candids[i] }}">
+          <input type="hidden" name="sourcename" value="{{ canddicts.names[i] }}">
+          <input type="hidden" name="ra" value="{{ canddicts.ras[i] }}">
+          <input type="hidden" name="dec" value="{{ canddicts.decs[i] }}">
+          <input type="hidden" name="scan_name" value="{{ scan_name }}">
+          <input type="hidden" name="user" value="{{ user }}">
+          {{ csrf() }}
+          <button class="btn btn-small" type="submit">Tom</button>
+        </form>
+        {% endif %}
       </div>
     </div>
   </article>
@@ -211,6 +224,41 @@
           {{ csrf() }}
           <button class="btn btn-small" type="submit">&#128227; Slack</button>
         </form>
+      </div>
+    </div>
+  </article>
+{% endfor %}
+</div>
+{% endmacro %}
+
+{# LSST: nearby-galaxy transients (galaxy_crossmatch_matches, via Babamul
+   for cutouts/light curve -- see surveys.py's "ADAPTER 3: LSST" section).
+   No candid/bandid/Fritz-Tom hookup yet -- one row is one object, and this
+   is the first (MVP) tab for this survey. #}
+{% macro lsst_candidate_cards(canddicts, numcands, user) %}
+<p class="count">{{ numcands }} candidate{{ '' if numcands == 1 else 's' }}{% if canddicts.pg_total is defined and canddicts.pg_total is not none %} of {{ canddicts.pg_total }} total &middot; page {{ canddicts.pg_page }} of {{ canddicts.pg_npages }}{% endif %}</p>
+<div class="cards">
+{% for i in range(0, numcands) %}
+  <article class="card">
+    <img class="cutout" src="{{ canddicts.cutouts[i] }}" alt="{{ canddicts.objectids[i] }}" loading="lazy" decoding="async">
+    <div class="card-body">
+      <div class="card-head">
+        <span class="name">{{ canddicts.objectids[i] }}</span>
+        <span class="coords">{{ '%.5f'|format(canddicts.ras[i]) }}, {{ '%.5f'|format(canddicts.decs[i]) }}</span>
+      </div>
+      <dl class="meta-grid">
+        <div><dt>peak mag</dt><dd>{{ '%.2f'|format(canddicts.peak_mags[i]) if canddicts.peak_mags[i] is not none else '—' }}</dd></div>
+        <div><dt>peak abs mag</dt><dd>{{ '%.2f'|format(canddicts.peak_absmags[i]) if canddicts.peak_absmags[i] is not none else '—' }}</dd></div>
+        <div><dt>ndet</dt><dd>{{ canddicts.ndets[i] }}</dd></div>
+        <div><dt>first det</dt><dd>{{ canddicts.first_detected_dates[i] }}</dd></div>
+        <div><dt>last det</dt><dd>{{ canddicts.last_detected_dates[i] }}</dd></div>
+        <div><dt>NED host</dt><dd>{{ canddicts.ned_objnames[i] or '—' }}{% if canddicts.ned_distmpcs[i] is not none %} ({{ '%.1f'|format(canddicts.ned_distmpcs[i]) }} Mpc{% if canddicts.ned_zs[i] is not none %}; z={{ '%.4f'|format(canddicts.ned_zs[i]) }}{% endif %}){% endif %}</dd></div>
+      </dl>
+      <div class="actions">
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://www.legacysurvey.org/viewer?ra={{ canddicts.ras[i] }}&dec={{ canddicts.decs[i] }}&zoom=14&mark={{ canddicts.ras[i] }},{{ canddicts.decs[i] }}">LS</a>
+        <a class="btn btn-small btn-secondary" target="_blank" rel="noopener"
+           href="https://simbad.cds.unistra.fr/simbad/sim-coo?Coord={{ canddicts.ras[i] }}%20{{ canddicts.decs[i] }}&Radius=10&Radius.unit=arcsec">SIMBAD</a>
       </div>
     </div>
   </article>

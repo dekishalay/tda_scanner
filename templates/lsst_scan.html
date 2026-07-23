@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% import '_macros.html' as m %}
-{% block title %}{{ scan_title }} &middot; WTP{% endblock %}
+{% block title %}{{ scan_title }} &middot; LSST{% endblock %}
 {% block content %}
 <h1>{{ scan_title }}</h1>
 <p><a href="/">&larr; Home</a></p>
@@ -22,13 +22,7 @@
 {% endif %}
 
 {% if canddicts and numcands > 0 %}
-  {% if ascii_list %}
-  <details class="form-toggle"><summary>ASCII list ({{ numcands }})</summary>
-  <pre style="white-space: pre-wrap; font-size: 11px;">{{ ascii_list }}</pre>
-  </details>
-  {% endif %}
-  <p class="cutout-note" style="font-size:12px;color:#666;margin:.25em 0;">Cutout shown is the brightest detection of each source.</p>
-  {{ m.candidate_cards(canddicts, numcands, user, scan_name|default(none), tom_listname|default(none), tom_web_base|default(none)) }}
+  {{ m.lsst_candidate_cards(canddicts, numcands, user) }}
   <p class="count">DB offset after this page: {{ defpardict.skipnum }}</p>
   {{ m.pagination(scan_action, defpardict, user) }}
 {% elif canddicts is not none %}

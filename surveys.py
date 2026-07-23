@@ -445,6 +445,8 @@ def build_scan_context(survey, scan_name, form):
 		scan_fields=spec.get('fields', []),
 		scan_query=qstr,
 		scan_action='/%s/scan/%s' % (survey.key, scan_name),
+		scan_name=scan_name,
+		tom_listname=NEOWISE_TOM_LISTS.get(scan_name),
 		ascii_list=ascii_name_list(canddicts))
 	return spec['template'], ctx
 
@@ -1568,6 +1570,131 @@ def prime_tom_upload_photometry(target_id, primeid):
 # <<< PRIME TOM upload
 
 
+# >>> NEOWISE TOM upload
+# Buttons on every WTP/WTPX scan card ('Tom') POST to /wtp/tom_save (app.py).
+# Each scanning tab maps to its own TOM target list -- NEOWISE_TOM_LISTS below
+# -- rather than a user-picked group as with PRIME (PRIME_TOM_LISTS). Uses the
+# same TOM_BASE_URL / TOM_TOKEN / _TOM_HDRS as the PRIME uploader above.
+# Photometry: forced diff + stack photometry (via wtp_fetch_forced, the exact
+# same query/detection convention the viewer uses -- FP_SNR_THRESH, mag
+# columns already computed in forced_photometry, no on-the-fly ZP math like
+# PRIME needs). The 'xmatch' (ZTF/LSST) tab additionally uploads broker
+# photometry for any crossmatched ZTF/LSST name, restricted to positive
+# (isdiffpos != False) detections only -- negative/subtraction-artifact
+# points and non-detections are not uploaded.
+NEOWISE_TOM_GROUP_ID = int(os.environ.get('NEOWISE_TOM_GROUP_ID', '2'))
+NEOWISE_TOM_GROUP_NAME = os.environ.get('NEOWISE_TOM_GROUP_NAME', 'NEOWISE')
+
+NEOWISE_TOM_LISTS = {
+    'hostless': 'neowise_hostless',
+    'hosted': 'neowise_hosted',
+    'clu': 'neowise_nearby_galaxies',
+    'nuclear': 'neowise_nuclear',
+    'smc': 'neowise_magellanic',
+    'lmc': 'neowise_magellanic',
+    'm31': 'neowise_m31',
+    'yso': 'neowise_yso',
+    'xmatch': 'neowise_ztf_lsst',
+}
+
+
+def neowise_tom_get_or_create_target(name, ra, dec, scan_name):
+    """Return (target_id, created_bool); raises on TOM failure."""
+    listname = NEOWISE_TOM_LISTS[scan_name]
+    r = requests.get('%s/api/targets/' % TOM_BASE_URL, params={'name': name},
+                     headers=_TOM_HDRS, timeout=30, verify=False)
+    if r.status_code == 200 and r.json().get('results'):
+        return int(r.json()['results'][0]['id']), False
+    r = requests.post('%s/api/targets/' % TOM_BASE_URL, headers=_TOM_HDRS,
+                      timeout=30, verify=False,
+                      json={'name': name, 'type': 'SIDEREAL',
+                            'ra': float(ra), 'dec': float(dec),
+                            'groups': [{'id': NEOWISE_TOM_GROUP_ID,
+                                       'name': NEOWISE_TOM_GROUP_NAME}],
+                            'target_lists': [{'name': listname}]})
+    if r.status_code != 201:
+        raise RuntimeError('TOM target create failed %d: %s'
+                           % (r.status_code, r.text[:200]))
+    return int(r.json()['id']), True
+
+
+def _neowise_tom_post(target_id, mjd, data_type, value):
+    try:
+        r = requests.post('%s/api/reduceddatums/' % TOM_BASE_URL,
+                          headers=_TOM_HDRS, timeout=30, verify=False,
+                          json={'target': target_id, 'data_type': data_type,
+                                'timestamp': Time(float(mjd), format='mjd').isot + 'Z',
+                                'value': value})
+        return r.status_code == 201
+    except Exception:
+        return False
+
+
+NEOWISE_TOM_BANDNAME = {1: 'W1', 2: 'W2'}
+
+
+def neowise_tom_upload_photometry(target_id, ra, dec, candid=None, scan_name=None):
+    """Diff + stack forced photometry -> TOM reduceddatums, plus (xmatch tab
+    only) positive-only ZTF/LSST broker photometry. Background thread; own
+    cursor."""
+    conn, cur = _wtp_open()
+    try:
+        fp = wtp_fetch_forced(cur, {'ra': ra, 'dec': dec})
+        ext = None
+        if scan_name == 'xmatch' and candid is not None:
+            ext = _wtpx_ext_names(cur, {'candid': candid})
+    finally:
+        _wtp_close(conn, cur)
+
+    n_ok = n_fail = 0
+    if fp is not None:
+        for i in range(len(fp['mjd'])):
+            band = NEOWISE_TOM_BANDNAME.get(int(fp['bandid'][i]))
+            if band is None:
+                continue
+            mjd = fp['mjd'][i]
+            if fp['isdet'][i] and np.isfinite(fp['mag'][i]):
+                value = {'magnitude': float(fp['mag'][i]),
+                         'error': float(abs(fp['magerr'][i])),
+                         'filter': '%s_diff' % band}
+            elif np.isfinite(fp['limmag'][i]):
+                value = {'limit': float(fp['limmag'][i]), 'filter': '%s_diff' % band}
+            else:
+                continue
+            ok = _neowise_tom_post(target_id, mjd, 'photometry', value)
+            n_ok += ok; n_fail += (not ok)
+            # Stack forced photometry: detections only -- no stack limiting
+            # magnitude is stored, matching the viewer's convention.
+            if fp['sisdet'][i] and np.isfinite(fp['smag'][i]):
+                svalue = {'magnitude': float(fp['smag'][i]),
+                          'error': float(abs(fp['smagerr'][i])),
+                          'filter': '%s_stack' % band}
+                ok = _neowise_tom_post(target_id, mjd, 'stack_photometry', svalue)
+                n_ok += ok; n_fail += (not ok)
+
+    if ext:
+        for s, k in (('ztf', 'ztfname'), ('lsst', 'lsstname')):
+            extname = ext.get(k)
+            if not extname:
+                continue
+            elc = babamul_get_lightcurve(s, extname)
+            if elc is None or not len(elc['mjd']):
+                continue
+            isneg = elc.get('isneg', np.zeros(len(elc['mjd']), dtype=bool))
+            pos_det = elc['isdet'] & ~isneg
+            for j in np.nonzero(pos_det)[0]:
+                value = {'magnitude': float(elc['mag'][j]),
+                         'error': float(abs(elc['magerr'][j])),
+                         'filter': '%s_%s' % (s, elc['filt'][j])}
+                ok = _neowise_tom_post(target_id, elc['mjd'][j], 'photometry', value)
+                n_ok += ok; n_fail += (not ok)
+
+    logging.getLogger(__name__).info('NEOWISE TOM phot ra=%.6f dec=%.6f scan=%s '
+                                     '-> target %s: %d ok, %d failed',
+                                     ra, dec, scan_name, target_id, n_ok, n_fail)
+# <<< NEOWISE TOM upload
+
+
 # >>> PRIME per-source viewer (lookup by primeid or ra/dec) [prime_render_source_png]
 # Standalone source page mirroring WTP search: resolve the sources row, render
 # its forced-photometry LC directly from primeid (no candid needed) as
@@ -2244,6 +2371,30 @@ def build_prime_source_context(survey, form):
 # <<< PRIME badges
 
 
+# >>> NEOWISE TOM badges
+# Chain onto build_scan_context so WTP/WTPX scan cards gain a tom_ids/tom_ex
+# array aligned with candids -- same idea as the PRIME badge chain above.
+# prime_tom_has_name/_prime_tom_ids_parallel have no PRIME-specific behavior
+# (just a name -> TOM target id lookup, TTL-cached), so they're reused as-is
+# rather than duplicated for NEOWISE.
+_prev_bsc_neowise_badges = build_scan_context
+def build_scan_context(survey, scan_name, form):
+    template, ctx = _prev_bsc_neowise_badges(survey, scan_name, form)
+    try:
+        if getattr(survey, 'key', None) in ('wtp', 'wtpx'):
+            cd = ctx.get('canddicts')
+            if cd and len(cd.get('ras', [])):
+                names = list(cd.get('names', []))
+                tids = _prime_tom_ids_parallel(names)
+                cd['tom_ids'] = np.array(tids, dtype=object)
+                cd['tom_ex'] = np.array([t is not None for t in tids], dtype=bool)
+                ctx['tom_web_base'] = (TOM_BASE_URL or '')
+    except Exception as _e:
+        logging.getLogger(__name__).warning('neowise badge annotate failed: %s', _e)
+    return template, ctx
+# <<< NEOWISE TOM badges
+
+
 # [patch] wtp-bugfix-20260717 applied
 
 # [patch] wtp-nightly-window-20260717 applied
@@ -2280,7 +2431,7 @@ import dataclasses as _dc
 # (survey, name) -> (ts, lc|None), TTL'd; on any failure return the stale
 # entry or None -- a scan render must never fail because the broker is down
 # (same rule as the Fritz cache above).
-from babamul.api import get_photometry
+from babamul.api import get_photometry, get_object
 from babamul.lightcurves import SNR_THRESHOLD, _normalize_band
 from babamul.exceptions import BabamulError
 
@@ -2369,11 +2520,13 @@ def babamul_get_lightcurve(ext_survey, name):
     return lc
 
 # Colors per (survey, filter); marker distinguishes survey on the plot
-# (ZTF = circles, LSST = squares). *** confirm LSST filter naming from broker.
+# (ZTF = circles, LSST = squares). LSST ugrizy scheme: g=green, r=red,
+# i=orange, z=brown, y=purple (u isn't part of that spec -- kept distinct
+# so it doesn't collide with y=purple).
 EXT_BAND_COLORS = {
     ('ztf', 'g'): 'green', ('ztf', 'r'): 'red', ('ztf', 'i'): 'orange',
-    ('lsst', 'u'): 'purple', ('lsst', 'g'): 'g', ('lsst', 'r'): 'r',
-    ('lsst', 'i'): 'goldenrod', ('lsst', 'z'): 'brown', ('lsst', 'y'): '0.4',
+    ('lsst', 'u'): 'navy', ('lsst', 'g'): 'green', ('lsst', 'r'): 'red',
+    ('lsst', 'i'): 'orange', ('lsst', 'z'): 'brown', ('lsst', 'y'): 'purple',
 }
 EXT_MARKERS = {'ztf': 'o', 'lsst': 's'}
 
@@ -2629,6 +2782,289 @@ def candidate_png_by_id(survey, candid):
         return _wtpx_render_png(survey, candid)
     return _png_pre_wtpx(survey, candid)
 # <<< NEOWISE x ZTF/LSST crossmatch scan
+
+
+# ============================================================================
+# ADAPTER 3: LSST (galaxy_crossmatch_matches -- alertfilter's Postgres sink)
+# ============================================================================
+# Standalone, NOT routed through the WTP/PRIME Survey/run_candidate_query/
+# serialize_candidates machinery: galaxy_crossmatch_matches (see
+# /Users/viraj/lsst/alertfilter/filters/crossmatch.py) is one flattened row
+# per objectId -- a snapshot, refreshed in place on re-match (alertfilter/
+# db.py), not a per-epoch candidate stream keyed by an integer candid the
+# way WTP/PRIME are. There are no cutouts or light-curve rows in this DB at
+# all; both come from Babamul on demand (get_object), the same broker
+# already used for the WTPX ('NEOWISE x ZTF/LSST') tab above.
+#
+# One tab for now: 'Nearby galaxies' -- date range (on last_detected_jd) +
+# a peak_abs_mag floor. GalaxyCrossmatchFilter's own intent is flagging
+# *sub-luminous* transients (see that module's docstring), so peak_abs_mag
+# is a lower bound: keep only matches at least this faint.
+_lsst_open, _lsst_close = make_pool_adapter('lsst', 'LSST_DSN',
+    maxconn=int(os.environ.get('LSST_POOL_MAX', '8')))
+
+# template key -> galaxy_crossmatch_matches column (single source of truth
+# for both the SELECT list and lsst_serialize below).
+LSST_FIELD_MAP = [
+    ('objectids', 'objectid'), ('ras', 'ra'), ('decs', 'dec'),
+    ('first_detected_jds', 'first_detected_jd'), ('last_detected_jds', 'last_detected_jd'),
+    ('ndets', 'n_detections'), ('drbs', 'drb'), ('rocks', 'rock'), ('stars', 'star'),
+    ('near_brightstars', 'near_brightstar'), ('stationarys', 'stationary'),
+    ('peak_mags', 'peak_mag'), ('peak_absmags', 'peak_abs_mag'),
+    ('ned_objnames', 'ned_1_objname'), ('ned_zs', 'ned_1_z'),
+    ('ned_distmpcs', 'ned_1_distance_mpc'), ('ned_distkpcs', 'ned_1_distance_kpc'),
+    ('ned_distmods', 'ned_1_distmod'),
+]
+LSST_COLS = ', '.join(col for _, col in LSST_FIELD_MAP)
+
+LSST_ALLOWED_SORT = {'last_detected_jd', 'first_detected_jd', 'peak_abs_mag',
+    'n_detections', 'peak_mag'}
+LSST_SORTS = [
+    ('last_detected_jd', 'Last detected'),
+    ('first_detected_jd', 'First detected'),
+    ('peak_abs_mag', 'Peak abs. mag'),
+    ('n_detections', '# detections'),
+]
+
+LSST_NEARBY_GALAXIES_FIELDS = [
+    {'kind': 'daterange', 'label': 'Date range (last detected, UTC)',
+        'lo': 'datemin', 'hi': 'datemax'},
+    {'kind': 'num', 'label': 'Peak abs. mag ≥', 'name': 'minabsmag', 'suffix': 'mag'},
+]
+LSST_NEARBY_GALAXIES_DEFAULTS = {'minabsmag': -15.0, 'candlim': 200, 'skipnum': 0,
+    'sb': 'last_detected_jd', 'so': 'desc'}
+
+
+def lsst_nearby_galaxies_where(form):
+    datemin = str(form.get('datemin', '') or '').strip()
+    datemax = str(form.get('datemax', '') or '').strip()
+    jdmin = Time(datemin).jd if datemin else 0.0
+    # +1 day: a bare date means "through the end of that day".
+    jdmax = (Time(datemax).jd + 1.0) if datemax else Time.now().jd
+    minabsmag = float(form.get('minabsmag', LSST_NEARBY_GALAXIES_DEFAULTS['minabsmag']))
+    sql = ("survey = 'LSST' AND last_detected_jd >= %s AND last_detected_jd < %s "
+        'AND peak_abs_mag IS NOT NULL AND peak_abs_mag >= %s')
+    return sql, [jdmin, jdmax, minabsmag]
+
+
+def run_lsst_scan(form):
+    """Run the nearby-galaxies query against LSST_DSN. Returns (rows, qstr,
+    total); total is best-effort (None on count timeout), same convention
+    as run_candidate_query."""
+    where_sql, where_params = lsst_nearby_galaxies_where(form)
+    skip = int(float(form.get('skipnum', 0)))
+    candlim = max(1, min(int(form.get('candlim', 200)), 1000))
+    sortcol = form.get('sb', 'last_detected_jd')
+    if sortcol not in LSST_ALLOWED_SORT:
+        sortcol = 'last_detected_jd'
+    direction = 'ASC' if str(form.get('so', 'desc')).lower() == 'asc' else 'DESC'
+    sql = ('SELECT %s FROM galaxy_crossmatch_matches WHERE %s '
+        'ORDER BY %s %s OFFSET %%s LIMIT %%s;' % (LSST_COLS, where_sql, sortcol, direction))
+    count_sql = 'SELECT count(*) AS n FROM galaxy_crossmatch_matches WHERE %s' % where_sql
+    conn, cur = _lsst_open()
+    try:
+        allparams = list(where_params) + [skip, candlim]
+        qstr = cur.mogrify(sql, allparams).decode()
+        logging.getLogger(__name__).info(qstr)
+        cur.execute(sql, allparams)
+        rows = cur.fetchall()
+        total = None
+        try:
+            cur.execute('SET statement_timeout = %s', (COUNT_TIMEOUT_MS,))
+            cur.execute(count_sql, where_params)
+            total = int(cur.fetchone()['n'])
+        except Exception:
+            logging.getLogger(__name__).warning(
+                'LSST page-count query failed/timeout; total hidden', exc_info=True)
+        finally:
+            try:
+                cur.execute('SET statement_timeout = 0')
+            except Exception:
+                pass
+    finally:
+        _lsst_close(conn, cur)
+    return rows, qstr, total
+
+
+def _lsst_jd_to_date(jd):
+    if jd is None:
+        return ''
+    try:
+        return Time(float(jd), format='jd').isot[:10]
+    except Exception:
+        return ''
+
+
+def lsst_serialize(rows):
+    d = {tk: [r[col] for r in rows] for tk, col in LSST_FIELD_MAP}
+    d['first_detected_dates'] = [_lsst_jd_to_date(v) for v in d['first_detected_jds']]
+    d['last_detected_dates'] = [_lsst_jd_to_date(v) for v in d['last_detected_jds']]
+    # distmod = peak_mag - peak_abs_mag: the same subtraction the crossmatch
+    # filter used to derive peak_abs_mag in the first place (see
+    # GalaxyCrossmatchFilter.evaluate), so it's self-consistent with the row
+    # regardless of which NED match was "nearest" -- no need to trust
+    # ned_1_distmod lining up with the one actually used. Passed via the
+    # cutout URL so lsst_candidate_png can draw the right-hand abs-mag axis
+    # without a second DB round-trip.
+    cutouts = []
+    for objectid, pm, pam in zip(d['objectids'], d['peak_mags'], d['peak_absmags']):
+        url = '/lsst/cutout/%s.png' % objectid
+        if pm is not None and pam is not None:
+            url += '?distmod=%.6f' % (pm - pam)
+        cutouts.append(url)
+    d['cutouts'] = cutouts
+    return d
+
+
+def build_lsst_scan_context(form):
+    """Run the scan and return a context dict for lsst_scan.html (same
+    shape/keys as build_scan_context, minus the fields this table has no
+    equivalent for -- no fetch_name/dedup, since one row already is one
+    object)."""
+    rows, qstr, total = run_lsst_scan(form)
+    skip = int(float(form.get('skipnum', 0)))
+    candlim = max(1, min(int(form.get('candlim', 200)), 1000))
+    reqcopy = form.to_dict()
+    reqcopy['skipnum'] = skip + len(rows)
+    canddicts = lsst_serialize(rows)
+    canddicts['pg_total'] = total
+    canddicts['pg_start'] = skip
+    if total is not None:
+        import math
+        canddicts['pg_page'] = skip // candlim + 1
+        canddicts['pg_npages'] = max(1, math.ceil(total / candlim))
+    return dict(numcands=len(canddicts['objectids']), canddicts=canddicts, defpardict=reqcopy,
+        scan_title='LSST: Nearby-galaxy transients',
+        scan_fields=LSST_NEARBY_GALAXIES_FIELDS,
+        scan_sorts=LSST_SORTS,
+        scan_query=qstr,
+        scan_action='/lsst/nearby_galaxies')
+
+
+# --- Babamul-backed cutouts + light curve for the per-object PNG -----------
+LSST_OBJ_TTL = float(os.environ.get('LSST_OBJ_TTL', '3600'))
+_LSST_OBJ_CACHE = {}
+_LSST_OBJ_LOCK = threading.Lock()
+
+
+def lsst_get_object(objectid):
+    """Babamul LsstAlert for this objectId (candidate info, cutouts, and
+    prv_candidates/fp_hists), TTL-cached; stale-on-failure like
+    babamul_get_lightcurve above."""
+    now = time.time()
+    with _LSST_OBJ_LOCK:
+        hit = _LSST_OBJ_CACHE.get(objectid)
+        if hit and now - hit[0] < LSST_OBJ_TTL:
+            return hit[1]
+    try:
+        obj = get_object('LSST', objectid)
+        # get_object's /objects/{id} response doesn't always inline the (large)
+        # cutout blobs -- LsstAlert.cutoutScience/Template/Difference can come
+        # back None even though the alert has cutouts. get_cutouts() is the
+        # model's own lazy-fetch for that (a separate /cutouts?candid= call,
+        # keyed by candid not objectId), and it mutates obj in place, so the
+        # cached copy stays fully populated for later hits too. Best-effort:
+        # a broker hiccup here shouldn't blank out the rest of the object.
+        if obj.cutoutScience is None or obj.cutoutTemplate is None or obj.cutoutDifference is None:
+            try:
+                obj.get_cutouts()
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    'babamul get_cutouts LSST/%s (candid=%s) failed: %s',
+                    objectid, getattr(obj, 'candid', None), e)
+    except Exception as e:
+        logging.getLogger(__name__).warning('babamul get_object LSST/%s failed: %s',
+            objectid, e)
+        with _LSST_OBJ_LOCK:
+            hit = _LSST_OBJ_CACHE.get(objectid)
+        return hit[1] if hit else None
+    with _LSST_OBJ_LOCK:
+        _LSST_OBJ_CACHE[objectid] = (now, obj)
+    return obj
+
+
+def _lsst_decode_cutout(blob):
+    """Cutout FITS bytes -> 2D array. Mirrors babamul.cutouts.plot_cutouts:
+    cutouts may or may not be gzip'd, so try gzip first and fall back to
+    raw FITS."""
+    try:
+        with gzip.open(io.BytesIO(blob), 'rb') as f:
+            data = fits.open(io.BytesIO(f.read()), ignore_missing_simple=True)[0].data
+    except OSError:
+        data = fits.open(io.BytesIO(blob), ignore_missing_simple=True)[0].data
+    return np.asarray(data, dtype=float)
+
+
+def lsst_candidate_png(objectid, distmod=None):
+    """Science/Template/Difference cutouts + a light-curve panel, straight
+    to PNG bytes. Cutouts come from the cached Babamul object; the light
+    curve reuses babamul_get_lightcurve (WTPX section above) so detection/
+    limit classification stays identical to the ZTF/LSST panel there.
+
+    distmod (mag - abs_mag for this object, from lsst_serialize) draws a
+    right-hand absolute-magnitude axis alongside the usual apparent-mag one
+    -- LSST nearby-galaxies tab only, not the WTPX crossmatch panel."""
+    obj = lsst_get_object(objectid)
+    if obj is None:
+        raise KeyError(objectid)
+    elc = babamul_get_lightcurve('lsst', objectid)
+
+    fig = Figure(figsize=(10, 8))
+    from matplotlib.gridspec import GridSpec
+    gs = GridSpec(2, 3, figure=fig, height_ratios=[1.0, 1.3])
+    titles = ('Science', 'Template', 'Difference')
+    blobs = (obj.cutoutScience, obj.cutoutTemplate, obj.cutoutDifference)
+    for i, (blob, ttl) in enumerate(zip(blobs, titles)):
+        a = fig.add_subplot(gs[0, i])
+        if not blob:
+            a.text(0.5, 0.5, 'no %s cutout' % ttl.lower(), ha='center', color='0.5',
+                transform=a.transAxes)
+            a.axis('off')
+        else:
+            try:
+                img = _lsst_decode_cutout(blob)
+                _, med, std = sigma_clipped_stats(img)
+                a.imshow(img, cmap='gray', vmin=med - std, vmax=med + 5 * std, origin='lower')
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    'LSST %s cutout decode failed for %s: %s', ttl, objectid, e)
+                a.text(0.5, 0.5, 'cutout decode failed', ha='center', color='0.5',
+                    transform=a.transAxes)
+            a.set_xticks([]); a.set_yticks([])
+        a.set_title(ttl, fontsize=13)
+
+    ax = fig.add_subplot(gs[1, :])
+    if elc is not None and len(elc['mjd']):
+        for f in np.unique(elc['filt']):
+            col = EXT_BAND_COLORS.get(('lsst', str(f)), 'k')
+            sel = (elc['filt'] == f)
+            det = sel & elc['isdet']
+            lim = sel & ~elc['isdet'] & np.isfinite(elc['limmag'])
+            if np.any(det):
+                ax.errorbar(elc['mjd'][det], elc['mag'][det], yerr=np.abs(elc['magerr'][det]),
+                    ls='none', marker='o', color=col, ms=7, label=str(f))
+            if np.any(lim):
+                ax.errorbar(elc['mjd'][lim], elc['limmag'][lim], yerr=0.2, uplims=True,
+                    ls='none', marker='v', color=col, markerfacecolor='none', ms=6, alpha=0.5)
+        ax.legend(fontsize=9)
+    else:
+        ax.text(0.5, 0.5, 'no broker photometry available', transform=ax.transAxes,
+            ha='center', color='0.5')
+    ax.invert_yaxis()
+    ax.set_xlabel('MJD', fontsize=14)
+    ax.set_ylabel('Magnitude', fontsize=14)
+    if distmod is not None and np.isfinite(distmod):
+        ax_abs = ax.secondary_yaxis('right',
+            functions=(lambda m: m - distmod, lambda m: m + distmod))
+        ax_abs.set_ylabel('Absolute magnitude', fontsize=14)
+    ax.set_title(objectid, fontsize=13)
+
+    fig.tight_layout()
+    FigureCanvasAgg(fig)
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=80)
+    return buf.getvalue()
+# <<< LSST nearby-galaxies scan
 
 
 # >>> Custom SQL scan -----------------------------------------------------
