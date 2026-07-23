@@ -1508,6 +1508,46 @@ except Exception:
 PRIME_TOM_ZP = 24.0
 PRIME_TOM_SNR = 5.0
 
+def _tom_target_lists(target):
+    """This target's current target-list names, from a GET /api/targets/
+    result dict. Tolerates entries being {'name': ...} dicts (the shape used
+    when writing target_lists on create) or plain strings."""
+    out = set()
+    for tl in target.get('target_lists') or []:
+        out.add(tl.get('name') if isinstance(tl, dict) else tl)
+    return out
+
+def _tom_ensure_in_list(target, listname):
+    """Make sure an EXISTING TOM target is a member of `listname` (e.g. the
+    current scanning tab's target list), without disturbing any list it's
+    already in. get_or_create_target only ever set target_lists at creation
+    time -- a target found via GET (already in TOM from some other tab/
+    upload) never got added to *this* tab's list.
+
+    Sends the full existing+new set of list names on PATCH rather than just
+    the new one: it's unconfirmed whether the TOM API's target_lists write
+    is additive or a full replace, and sending the union is correct either
+    way (a wrong guess there could silently drop the target from lists it
+    already belonged to). Best-effort -- logs and returns on failure, never
+    raises, since the target itself already exists by the time this runs.
+    """
+    existing = _tom_target_lists(target)
+    if listname in existing:
+        return
+    target_id = int(target['id'])
+    try:
+        r = requests.patch('%s/api/targets/%d/' % (TOM_BASE_URL, target_id),
+            headers=_TOM_HDRS, timeout=30, verify=False,
+            json={'target_lists': [{'name': n} for n in existing | {listname}]})
+        if r.status_code not in (200, 202):
+            logging.getLogger(__name__).warning(
+                'TOM add-to-list failed for target %d -> %r: %d %s',
+                target_id, listname, r.status_code, r.text[:200])
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            'TOM add-to-list errored for target %d -> %r: %s',
+            target_id, listname, e)
+
 
 def prime_tom_get_or_create_target(name, ra, dec, group_key):
     """Return (target_id, created_bool); raises on TOM failure."""
@@ -1604,7 +1644,9 @@ def neowise_tom_get_or_create_target(name, ra, dec, scan_name):
     r = requests.get('%s/api/targets/' % TOM_BASE_URL, params={'name': name},
                      headers=_TOM_HDRS, timeout=30, verify=False)
     if r.status_code == 200 and r.json().get('results'):
-        return int(r.json()['results'][0]['id']), False
+        target = r.json()['results'][0]
+        _tom_ensure_in_list(target, listname)
+        return int(target['id']), False
     r = requests.post('%s/api/targets/' % TOM_BASE_URL, headers=_TOM_HDRS,
                       timeout=30, verify=False,
                       json={'name': name, 'type': 'SIDEREAL',
