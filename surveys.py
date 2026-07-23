@@ -1405,7 +1405,7 @@ _NIGHTLY_DEF = {
     'datemin': PRIME_DATE_LO, 'datemax': PRIME_DATE_HI,
     'fieldlist': ', '.join(PRIME_GB_FIELDS),
     'agelowlim': 0.0,
-    'agehighlim': _nc('layer0.age_scope_days', 30.0),
+    'agehighlim': 5.0,
     'scorrpeak': _nc('layer1.scorr_peak.lo', 7.09),
     'chi2hi': _nc('layer1.psf_chi2.hi', 271.23),
     'fwhmlo': _nc('layer1.fwhm.lo', 1.70),
